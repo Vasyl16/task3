@@ -69,6 +69,39 @@ a working local-dev default via `${VAR:-default}` substitution, so
 Override any of them with a root-level `.env` file or exported shell env
 vars if you need non-default ports or a real master key locally.
 
+## Environment Variables
+
+Each app has its own `.env` (gitignored) copied from its own
+`.env.example`. **Backend `.env` is server-only and never sent to the
+browser.** Frontend `.env` is different: Vite inlines every
+`VITE_`-prefixed var into the built JS bundle, so anything there is
+public — visible to anyone via devtools. Never put a secret in a
+`VITE_*` var.
+
+Both apps validate their env at startup and fail fast with a clear error
+if something required is missing or malformed — see
+`backend/src/config/env.validation.ts` (Joi schema) and
+`frontend/src/shared/config/env.ts`.
+
+**Backend** (`backend/.env`, see `backend/.env.example` for the full list):
+
+| Variable | Required? | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | **Required, no default** | Remote PostgreSQL connection string |
+| `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET` | **Required, no default** (min 16 chars) | Token signing secrets |
+| `PORT`, `CORS_ORIGIN`, `NODE_ENV` | Optional | App-level defaults |
+| `REDIS_URL` | Optional | Defaults to the local docker-compose Redis |
+| `MEILISEARCH_HOST`, `MEILI_MASTER_KEY` | Optional | Defaults to the local docker-compose Meilisearch |
+| `JWT_ACCESS_EXPIRES_IN` / `JWT_REFRESH_EXPIRES_IN` | Optional | Token lifetimes |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_CALLBACK_URL` | Optional (placeholders) | Not wired up yet |
+
+**Frontend** (`frontend/.env`, see `frontend/.env.example`) — public only:
+
+| Variable | Required? | Purpose |
+| --- | --- | --- |
+| `VITE_API_URL` | Required | Backend REST base URL |
+| `VITE_WS_URL` | Required | Backend WebSocket base URL |
+
 ## Getting Started
 
 ### 1. Start local infrastructure (Redis + Meilisearch)
@@ -120,6 +153,9 @@ README as those pieces are implemented.
 
 ## Status
 
-This repository currently contains only the **foundation**: scaffolded
-backend/frontend apps, tooling (lint/format/test/build), and local infra
-config. No business logic, database schema, or API endpoints exist yet.
+This repository currently contains the **foundation**: scaffolded
+backend/frontend apps with layered structure (backend `config/core/modules`,
+frontend FSD), tooling (lint/format/test/build), local infra config, and
+validated app configuration (env vars, required vs. optional, server-only
+vs. public). No authentication, business logic, database schema, or API
+endpoints exist yet.

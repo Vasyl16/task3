@@ -50,9 +50,13 @@ Also read the root `../CLAUDE.md` — these rules add to, not replace, it.
 
 `src/` is organized as:
 
-- `config/` — env var loading (`@nestjs/config`, `configuration.ts`). Add
-  new config keys here, typed — never read `process.env` directly outside
-  this folder.
+- `config/` — env var loading (`@nestjs/config`, `configuration.ts`) and
+  validation (`env.validation.ts`, a Joi schema). Add new config keys to
+  both files, typed — never read `process.env` directly outside this
+  folder. A var with no safe default (secrets, `DATABASE_URL`) must be
+  `.required()` in the schema so the app fails fast at startup instead of
+  booting misconfigured; only give a var a Joi `.default()` when running
+  without it locally is genuinely fine.
 - `core/` — cross-cutting, app-wide providers (correlation IDs, structured
   logging, global exception filters/guards) imported once into
   `AppModule`. Not a place for domain logic.

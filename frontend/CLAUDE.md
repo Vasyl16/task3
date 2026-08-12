@@ -36,6 +36,13 @@ Also read the root `../CLAUDE.md` — these rules add to, not replace, it.
 - On WebSocket reconnect, resync by refetching the relevant queries rather
   than assuming no messages were missed while disconnected.
 
+## Environment variables
+
+- Only `VITE_`-prefixed vars are exposed to the browser bundle (Vite's
+  build-time inlining) — **never** put a secret in one, it's readable in
+  devtools by anyone. Add new public config to `src/shared/config/env.ts`
+  (validated at import time) and type it in `src/vite-env.d.ts`.
+
 ## Validation & types
 
 - Trust the backend's DTO validation for correctness, but keep request/
