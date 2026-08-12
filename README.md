@@ -10,10 +10,16 @@ separately.
 ```
 .
 ├── backend/            # NestJS + TypeScript API (modular monolith)
+│   ├── prisma/
+│   │   ├── schema.prisma # domain model (PostgreSQL, remote — see "Database" below)
+│   │   └── migrations/    # tracked migration history
 │   └── src/
-│       ├── config/       # env var loading (@nestjs/config)
-│       ├── core/         # cross-cutting app-wide providers (empty until needed)
-│       └── modules/      # one NestJS module per domain boundary (empty until first module)
+│       ├── config/         # env var loading (@nestjs/config)
+│       ├── core/           # cross-cutting app-wide providers (correlation IDs)
+│       ├── infrastructure/ # shared plumbing: Prisma client, outbox, health
+│       └── modules/        # one NestJS module per domain boundary — see
+│                            # the backend-architecture skill for the
+│                            # layout and dependency-direction rules
 ├── frontend/           # React + TypeScript app (Vite), Feature-Sliced Design
 │   └── src/
 │       ├── app/          # root component, providers, global styles, routing
@@ -23,12 +29,18 @@ separately.
 │       ├── entities/      # business entities (data shape, API, minimal display)
 │       └── shared/        # business-agnostic reusable code (UI kit, API client, assets)
 ├── docker-compose.yml  # Local infra: Redis + Meilisearch only
-└── .claude/             # Project-specific Claude Code instructions
+└── .claude/
+    ├── rules/            # always-on / path-scoped rules (general, backend,
+    │                      # frontend, testing) — see CLAUDE.md
+    └── skills/           # on-demand reference (backend-architecture,
+                           # frontend-architecture, database, testing,
+                           # code-review-checklist)
 ```
 
-Backend layering and FSD import-direction rules are enforced via
-`backend/CLAUDE.md` and `frontend/CLAUDE.md` — read those before adding
-code to either app.
+Backend layering, dependency direction, and FSD import-direction rules
+are enforced via `.claude/rules/` (short, path-scoped) and the
+`.claude/skills/backend-architecture` / `frontend-architecture` skills
+(detailed reference) — read those before adding code to either app.
 
 ### Why no root `package.json`?
 
@@ -68,6 +80,32 @@ a working local-dev default via `${VAR:-default}` substitution, so
 `docker compose up -d` works immediately with no `.env` file required.
 Override any of them with a root-level `.env` file or exported shell env
 vars if you need non-default ports or a real master key locally.
+
+## Database (Prisma)
+
+`backend/prisma/schema.prisma` is the domain model; `backend/prisma/migrations/`
+is the tracked, additive migration history. See the `.claude/skills/database`
+skill for the full entity/relationship rundown, constraint rationale, and
+migration safety rules.
+
+- **Prisma 7** moved the connection URL out of `schema.prisma` into
+  `backend/prisma.config.ts` (CLI-only — the running app still reads
+  `DATABASE_URL` itself via `src/config/`, independently).
+- Never run a destructive/reset command (`migrate reset`,
+  `db push --force-reset`) against the real `DATABASE_URL` without
+  explicit approval — it's a remote, shared database, not a disposable
+  local container.
+- **Pooled connections (e.g. Neon's `-pooler` endpoint):** `prisma
+  migrate`/`db push` need a direct (non-pooled) connection — PgBouncer in
+  transaction-pooling mode doesn't support the advisory locks Migrate
+  uses. If `DATABASE_URL` points at a pooled endpoint and migrate
+  commands fail or hang, point `prisma.config.ts` at a direct connection
+  string instead for that command.
+- Commands: `npm run prisma:generate` (regenerate client, offline),
+  `npm run prisma:validate` (schema-only check, offline),
+  `npm run prisma:migrate:status` (read-only remote check),
+  `npm run prisma:migrate:dev` / `prisma:migrate:deploy` (apply — treat as
+  a deliberate, reviewed action, not a routine one).
 
 ## Environment Variables
 
@@ -145,17 +183,24 @@ Run these from inside `backend/` or `frontend/` respectively:
 
 ## Architecture Notes
 
-See `.claude/CLAUDE.md`, `backend/CLAUDE.md`, and `frontend/CLAUDE.md` for
-the enforced conventions (module boundaries, transaction rules, DTO
-validation, idempotent event handlers, etc.). A full architecture write-up
-(consistency model, outbox/event flow, domain events) will be added to this
-README as those pieces are implemented.
+See `CLAUDE.md` for the pointer to `.claude/rules/` (always-on / path-
+scoped rules) and `.claude/skills/` (module boundaries, transaction
+rules, DTO validation, idempotent event handlers, migration safety,
+etc.). A full architecture write-up (consistency model, outbox/event
+flow, domain events) will be added to this README as those pieces are
+implemented.
 
 ## Status
 
 This repository currently contains the **foundation**: scaffolded
-backend/frontend apps with layered structure (backend `config/core/modules`,
-frontend FSD), tooling (lint/format/test/build), local infra config, and
-validated app configuration (env vars, required vs. optional, server-only
-vs. public). No authentication, business logic, database schema, or API
-endpoints exist yet.
+backend/frontend apps with layered structure (backend
+`config/core/infrastructure/modules`, frontend FSD), tooling
+(lint/format/test/build), local infra config, validated app configuration
+(env vars, required vs. optional, server-only vs. public), the initial
+Prisma domain model applied to the remote database, and the backend's
+NestJS module boundaries (controller/service/repository/DTO per module,
+see the `backend-architecture` skill) with basic CRUD wired end-to-end. Genuinely
+complex business logic (checkout, bid placement, order-status aggregation,
+refund resolution) is intentionally stubbed (`NotImplementedException`)
+pending its own task, and there's no authentication yet (no guards, no
+password hashing, no JWT issuance).

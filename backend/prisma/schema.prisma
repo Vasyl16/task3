@@ -1,0 +1,475 @@
+// Initial domain model for the marketplace. Postgres is the single source
+// of truth for everything here (see ../CLAUDE.md and ../../CLAUDE.md).
+//
+// Scope notes (deliberately NOT modeled yet, to avoid over-engineering
+// ahead of need):
+// - Single application-wide currency assumed; no per-row currency column.
+// - No product variants — Product is the sellable unit directly.
+// - No dedicated Payment/gateway-transaction table — LedgerEntry records
+//   the fact of a sale/commission/refund/payout abstractly; payment
+//   gateway integration is a separate future concern.
+// - No CQRS/read-model tables — Meilisearch (outside Postgres) is the
+//   only read model, kept eventually consistent via OutboxEvent.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ===================== Identity & Access =====================
+
+enum UserRole {
+  BUYER
+  ADMIN
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String? // null for Google-OAuth-only accounts
+  name         String
+  avatarUrl    String?
+  role         UserRole @default(BUYER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Seller capability is NOT a role flag — it's derived from having an
+  // APPROVED SellerProfile, to avoid two sources of truth that can drift.
+  sellerProfile          SellerProfile?  @relation("SellerProfileOwner")
+  sellerProfilesReviewed SellerProfile[] @relation("SellerProfileReviewer")
+
+  cart          Cart?
+  orders        Order[]
+  bids          Bid[]
+  wonAuctions   Auction[]      @relation("AuctionWinner")
+  notifications Notification[]
+  reviews       Review[]
+
+  refundsRequested Refund[]  @relation("RefundRequester")
+  refundsResolved  Refund[]  @relation("RefundResolver")
+  disputesRaised   Dispute[] @relation("DisputeRaiser")
+  disputesResolved Dispute[] @relation("DisputeResolver")
+
+  @@index([role])
+}
+
+enum SellerProfileStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+model SellerProfile {
+  id           String              @id @default(uuid())
+  userId       String              @unique
+  user         User                @relation("SellerProfileOwner", fields: [userId], references: [id], onDelete: Restrict)
+  businessName String
+  description  String?
+  status       SellerProfileStatus @default(PENDING)
+
+  reviewedByUserId String?
+  reviewedByUser   User?     @relation("SellerProfileReviewer", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
+  reviewedAt       DateTime?
+
+  appliedAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products      Product[]
+  auctions      Auction[]
+  sellerOrders  SellerOrder[]
+  ledgerEntries LedgerEntry[]
+  reviews       Review[]
+
+  @@index([status])
+}
+
+// ===================== Catalog =====================
+
+model Category {
+  id        String     @id @default(uuid())
+  name      String     @unique
+  slug      String     @unique
+  parentId  String?
+  parent    Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children  Category[] @relation("CategoryHierarchy")
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  products Product[]
+
+  @@index([parentId])
+}
+
+enum ProductStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+model Product {
+  id          String        @id @default(uuid())
+  sellerId    String
+  seller      SellerProfile @relation(fields: [sellerId], references: [id], onDelete: Restrict)
+  categoryId  String
+  category    Category      @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  name        String
+  slug        String        @unique
+  description String?
+  basePrice   Decimal       @db.Decimal(12, 2)
+  status      ProductStatus @default(DRAFT)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  inventory  Inventory?
+  auctions   Auction[]
+  cartItems  CartItem[]
+  orderItems OrderItem[]
+
+  @@index([sellerId])
+  @@index([categoryId, status])
+}
+
+// Optimistic-locked stock: reservation/decrement during checkout does
+// `UPDATE ... WHERE productId = ? AND version = ?`, never a blind write.
+model Inventory {
+  id                String   @id @default(uuid())
+  productId         String   @unique
+  product           Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  quantityAvailable Int      @default(0)
+  quantityReserved  Int      @default(0)
+  version           Int      @default(0)
+  updatedAt         DateTime @updatedAt
+}
+
+// ===================== Auctions =====================
+
+enum AuctionStatus {
+  SCHEDULED
+  ACTIVE
+  ENDED
+  CANCELLED
+}
+
+// version is the optimistic-concurrency guard for bid placement: a bid is
+// only accepted by `UPDATE ... WHERE id = ? AND version = ?`, so two
+// concurrent bids can never both "win" a race.
+model Auction {
+  id        String        @id @default(uuid())
+  productId String
+  product   Product       @relation(fields: [productId], references: [id], onDelete: Restrict)
+  sellerId  String
+  seller    SellerProfile @relation(fields: [sellerId], references: [id], onDelete: Restrict)
+
+  startingPrice Decimal @db.Decimal(12, 2)
+
+  // Denormalized current-winner cache, updated transactionally with each
+  // accepted bid — avoids a join for the common "show current price" read.
+  currentHighestBid      Decimal? @db.Decimal(12, 2)
+  currentHighestBidderId String?
+  currentHighestBidder   User?    @relation("AuctionWinner", fields: [currentHighestBidderId], references: [id], onDelete: SetNull)
+
+  status    AuctionStatus @default(SCHEDULED)
+  version   Int           @default(0)
+  startsAt  DateTime
+  endsAt    DateTime
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  bids Bid[]
+
+  @@index([status, endsAt])
+  @@index([productId])
+  @@index([sellerId])
+}
+
+// Immutable append-only ledger — no status field. The winning bid is
+// always the one matching Auction.currentHighestBidderId/currentHighestBid;
+// duplicating "winning" state here would be a second source of truth.
+model Bid {
+  id        String   @id @default(uuid())
+  auctionId String
+  auction   Auction  @relation(fields: [auctionId], references: [id], onDelete: Restrict)
+  bidderId  String
+  bidder    User     @relation(fields: [bidderId], references: [id], onDelete: Restrict)
+  amount    Decimal  @db.Decimal(12, 2)
+  placedAt  DateTime @default(now())
+
+  @@index([auctionId, amount(sort: Desc)])
+  @@index([auctionId, placedAt])
+  @@index([bidderId])
+}
+
+// ===================== Cart =====================
+
+model Cart {
+  id        String   @id @default(uuid())
+  buyerId   String   @unique
+  buyer     User     @relation(fields: [buyerId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items CartItem[]
+}
+
+model CartItem {
+  id        String   @id @default(uuid())
+  cartId    String
+  cart      Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  quantity  Int      @default(1)
+  addedAt   DateTime @default(now())
+
+  @@unique([cartId, productId])
+  @@index([cartId])
+}
+
+// ===================== Orders =====================
+
+// Parent Order status is DERIVED from its SellerOrders — recomputed
+// synchronously, in the same transaction as the SellerOrder status change
+// that triggers it (see ../CLAUDE.md). Never written independently.
+enum OrderStatus {
+  PENDING
+  PARTIALLY_FULFILLED
+  FULFILLED
+  PARTIALLY_CANCELLED
+  CANCELLED
+}
+
+model Order {
+  id          String      @id @default(uuid())
+  buyerId     String
+  buyer       User        @relation(fields: [buyerId], references: [id], onDelete: Restrict)
+  status      OrderStatus @default(PENDING)
+  totalAmount Decimal     @db.Decimal(12, 2)
+  placedAt    DateTime    @default(now())
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  sellerOrders SellerOrder[]
+
+  @@index([buyerId])
+  @@index([status])
+}
+
+// Independent per-seller lifecycle — a multi-vendor Order decomposes into
+// one SellerOrder per seller, each moving through CONFIRMED/SHIPPED/etc.
+// on its own; the parent Order never has its own independent status.
+enum SellerOrderStatus {
+  PENDING
+  CONFIRMED
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+model SellerOrder {
+  id          String            @id @default(uuid())
+  orderId     String
+  order       Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  sellerId    String
+  seller      SellerProfile     @relation(fields: [sellerId], references: [id], onDelete: Restrict)
+  status      SellerOrderStatus @default(PENDING)
+  subtotal    Decimal           @db.Decimal(12, 2)
+  shippingFee Decimal           @default(0) @db.Decimal(12, 2)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  items         OrderItem[]
+  ledgerEntries LedgerEntry[]
+  refunds       Refund[]
+  review        Review?
+  disputes      Dispute[]
+
+  @@index([orderId])
+  @@index([sellerId])
+  @@index([status])
+}
+
+model OrderItem {
+  id            String      @id @default(uuid())
+  sellerOrderId String
+  sellerOrder   SellerOrder @relation(fields: [sellerOrderId], references: [id], onDelete: Cascade)
+  productId     String
+  product       Product     @relation(fields: [productId], references: [id], onDelete: Restrict)
+  quantity      Int
+  // Snapshot at time of purchase — never re-read live Product.basePrice.
+  unitPrice     Decimal     @db.Decimal(12, 2)
+  createdAt     DateTime    @default(now())
+
+  @@index([sellerOrderId])
+  @@index([productId])
+}
+
+// ===================== Finance =====================
+
+enum LedgerEntryType {
+  SALE
+  COMMISSION
+  REFUND
+  PAYOUT
+  ADJUSTMENT
+}
+
+// Append-only per-seller money-movement log. amount is signed
+// (+credit / -debit); balance is always derived by summing, never stored.
+model LedgerEntry {
+  id            String          @id @default(uuid())
+  sellerId      String
+  seller        SellerProfile   @relation(fields: [sellerId], references: [id], onDelete: Restrict)
+  sellerOrderId String?
+  sellerOrder   SellerOrder?    @relation(fields: [sellerOrderId], references: [id], onDelete: SetNull)
+  type          LedgerEntryType
+  amount        Decimal         @db.Decimal(12, 2)
+  createdAt     DateTime        @default(now())
+
+  @@index([sellerId])
+  @@index([sellerOrderId])
+  @@index([type])
+}
+
+enum RefundStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  PROCESSED
+}
+
+model Refund {
+  id            String       @id @default(uuid())
+  sellerOrderId String
+  sellerOrder   SellerOrder  @relation(fields: [sellerOrderId], references: [id], onDelete: Restrict)
+  requestedById String
+  requestedBy   User         @relation("RefundRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+  amount        Decimal      @db.Decimal(12, 2)
+  reason        String?
+  status        RefundStatus @default(REQUESTED)
+
+  resolvedById String?
+  resolvedBy   User?     @relation("RefundResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+  resolvedAt   DateTime?
+
+  requestedAt DateTime @default(now())
+
+  @@index([sellerOrderId])
+  @@index([status])
+}
+
+// ===================== Events & Async Processing =====================
+
+enum OutboxEventStatus {
+  PENDING
+  PROCESSING
+  PUBLISHED
+  FAILED
+}
+
+// Deliberately NOT foreign-keyed to domain tables — aggregateType/
+// aggregateId are plain strings so the outbox stays generic and decoupled
+// from whatever schema changes happen to specific entities later.
+// Written in the SAME transaction as the domain change it describes.
+model OutboxEvent {
+  id            String            @id @default(uuid())
+  aggregateType String
+  aggregateId   String
+  eventType     String
+  payload       Json
+  correlationId String
+  status        OutboxEventStatus @default(PENDING)
+  attempts      Int               @default(0)
+  createdAt     DateTime          @default(now())
+  processedAt   DateTime?
+
+  processedBy ProcessedEvent[]
+
+  @@index([status, createdAt])
+  @@index([correlationId])
+  @@index([aggregateType, aggregateId])
+}
+
+// The idempotency guard for at-least-once event delivery: a consumer
+// inserts (eventId, consumerName) before acting on an event. A unique
+// violation means "already handled" — skip, don't reapply side effects.
+model ProcessedEvent {
+  id           String      @id @default(uuid())
+  eventId      String
+  event        OutboxEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  consumerName String
+  processedAt  DateTime    @default(now())
+
+  @@unique([eventId, consumerName])
+}
+
+// ===================== Notifications =====================
+
+// Persisted so the REST API can serve full current state on WebSocket
+// reconnect — the WS push is delivery-only, this table is the source of
+// truth for "what notifications does this user have."
+model Notification {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String
+  title     String
+  body      String
+  data      Json?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, readAt])
+  @@index([userId, createdAt])
+}
+
+// ===================== Trust & Safety =====================
+
+// Unique per SellerOrder — only a verified (completed) purchase can be
+// reviewed, and only once.
+model Review {
+  id            String        @id @default(uuid())
+  sellerOrderId String        @unique
+  sellerOrder   SellerOrder   @relation(fields: [sellerOrderId], references: [id], onDelete: Restrict)
+  authorId      String
+  author        User          @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  sellerId      String
+  seller        SellerProfile @relation(fields: [sellerId], references: [id], onDelete: Restrict)
+  rating        Int
+  comment       String?
+  createdAt     DateTime      @default(now())
+
+  @@index([sellerId])
+  @@index([authorId])
+}
+
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED
+  REJECTED
+}
+
+model Dispute {
+  id            String        @id @default(uuid())
+  sellerOrderId String
+  sellerOrder   SellerOrder   @relation(fields: [sellerOrderId], references: [id], onDelete: Restrict)
+  raisedById    String
+  raisedBy      User          @relation("DisputeRaiser", fields: [raisedById], references: [id], onDelete: Restrict)
+  reason        String
+  status        DisputeStatus @default(OPEN)
+  resolution    String?
+
+  resolvedById String?
+  resolvedBy   User?     @relation("DisputeResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+  resolvedAt   DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([sellerOrderId])
+  @@index([status])
+}
