@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { Prisma, Product } from '@prisma/client';
+import { ProductStatus, type Prisma, type Product } from '@prisma/client';
 import { PrismaService } from '../../../infrastructure/prisma/prisma.service';
 import {
   CreateProductWithInventoryInput,
@@ -18,6 +18,9 @@ export class PrismaProductsRepository implements ProductsRepository {
       where: {
         categoryId: filter?.categoryId,
         sellerId: filter?.sellerId,
+        // Archived (deactivated) products never appear in browsing —
+        // they still exist for cart/order history, just not discoverable.
+        status: { not: ProductStatus.ARCHIVED },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -39,6 +42,8 @@ export class PrismaProductsRepository implements ProductsRepository {
         slug: data.slug,
         description: data.description,
         basePrice: data.basePrice,
+        type: data.type,
+        status: ProductStatus.ACTIVE,
       },
     });
     await tx.inventory.create({
@@ -55,5 +60,12 @@ export class PrismaProductsRepository implements ProductsRepository {
     data: Partial<{ name: string; description: string; basePrice: number }>,
   ): Promise<Product> {
     return this.prisma.product.update({ where: { id }, data });
+  }
+
+  archive(id: string): Promise<Product> {
+    return this.prisma.product.update({
+      where: { id },
+      data: { status: ProductStatus.ARCHIVED },
+    });
   }
 }

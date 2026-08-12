@@ -1,9 +1,10 @@
 import {
+  BadRequestException,
   Injectable,
   NotFoundException,
   NotImplementedException,
 } from '@nestjs/common';
-import type { Auction, Bid } from '@prisma/client';
+import { ProductType, type Auction, type Bid } from '@prisma/client';
 import { ProductsService } from '../products/products.service';
 import { SellersService } from '../sellers/sellers.service';
 import { BiddingRepository } from './domain/bidding.repository';
@@ -34,7 +35,12 @@ export class BiddingService {
   }
 
   async createAuction(dto: CreateAuctionDto): Promise<Auction> {
-    await this.productsService.findById(dto.productId);
+    const product = await this.productsService.findById(dto.productId);
+    if (product.type !== ProductType.AUCTION) {
+      throw new BadRequestException(
+        'An auction can only be created for an AUCTION-type product',
+      );
+    }
     await this.sellersService.findById(dto.sellerId);
     return this.biddingRepository.createAuction({
       ...dto,

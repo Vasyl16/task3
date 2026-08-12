@@ -1,4 +1,4 @@
-import type { Prisma, Product } from '@prisma/client';
+import type { Prisma, Product, ProductType } from '@prisma/client';
 
 export interface CreateProductWithInventoryInput {
   sellerId: string;
@@ -7,6 +7,7 @@ export interface CreateProductWithInventoryInput {
   slug: string;
   description?: string;
   basePrice: number;
+  type: ProductType;
   initialQuantity: number;
 }
 
@@ -26,4 +27,9 @@ export abstract class ProductsRepository {
     id: string,
     data: Partial<{ name: string; description: string; basePrice: number }>,
   ): Promise<Product>;
+  // Soft delete only — sets status to ARCHIVED. Never a physical DELETE:
+  // an archived product may still be referenced by existing carts,
+  // OrderItems, or Auctions, and destroying the row would break that
+  // history. See ProductsService.archive.
+  abstract archive(id: string): Promise<Product>;
 }

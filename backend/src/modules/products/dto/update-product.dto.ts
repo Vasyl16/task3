@@ -11,6 +11,6 @@ export class UpdateProductDto {
 
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
-  @Min(0)
+  @Min(0.01)
   basePrice?: number;
 }
