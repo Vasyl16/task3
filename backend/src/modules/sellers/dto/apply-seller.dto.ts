@@ -1,9 +1,9 @@
-import { IsOptional, IsString, IsUUID, MinLength } from 'class-validator';
+import { IsOptional, IsString, MinLength } from 'class-validator';
 
+// No userId field — the applicant is always the authenticated caller
+// (see SellersController.apply / @CurrentUser()), never a client-supplied
+// value.
 export class ApplySellerDto {
-  @IsUUID()
-  userId!: string;
-
   @IsString()
   @MinLength(1)
   businessName!: string;

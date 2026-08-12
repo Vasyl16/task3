@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { User } from '@prisma/client';
+import type { Prisma, User, UserRole } from '@prisma/client';
 import { PrismaService } from '../../../infrastructure/prisma/prisma.service';
 import { UsersRepository } from '../domain/users.repository';
 
@@ -28,5 +28,13 @@ export class PrismaUsersRepository implements UsersRepository {
     data: Partial<{ name: string; avatarUrl: string }>,
   ): Promise<User> {
     return this.prisma.user.update({ where: { id }, data });
+  }
+
+  updateRole(
+    tx: Prisma.TransactionClient,
+    id: string,
+    role: UserRole,
+  ): Promise<User> {
+    return tx.user.update({ where: { id }, data: { role } });
   }
 }

@@ -1,43 +1,41 @@
-import {
-  Body,
-  Controller,
-  Get,
-  Param,
-  Patch,
-  Post,
-  Query,
-} from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
+import { UserRole } from '@prisma/client';
+import { CurrentUser } from '../../core/auth/decorators/current-user.decorator';
+import { Roles } from '../../core/auth/decorators/roles.decorator';
+import type { AuthenticatedUser } from '../../core/auth/authenticated-user.interface';
 import { OrdersService } from './orders.service';
-import { CheckoutDto } from './dto/checkout.dto';
 import { UpdateSellerOrderStatusDto } from './dto/update-seller-order-status.dto';
 
-// TODO(auth): buyerId should come from the authenticated caller; seller-
-// order status updates must be restricted to the owning seller (or ADMIN).
-// TODO: rate limit POST /checkout (checkout is a plausible abuse target).
+// TODO: rate limit POST /checkout (checkout is a plausible abuse target
+// — see .claude/rules/backend.md).
 @Controller('orders')
 export class OrdersController {
   constructor(private readonly ordersService: OrdersService) {}
 
   @Get()
-  findByBuyerId(@Query('buyerId') buyerId: string) {
-    return this.ordersService.findByBuyerId(buyerId);
+  findMyOrders(@CurrentUser() user: AuthenticatedUser) {
+    return this.ordersService.findByBuyerId(user.id);
   }
 
   @Get(':id')
-  findById(@Param('id') id: string) {
-    return this.ordersService.findById(id);
+  findById(@Param('id') id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.ordersService.findById(id, user);
   }
 
   @Post('checkout')
-  checkout(@Body() dto: CheckoutDto) {
-    return this.ordersService.checkout(dto);
+  checkout(@CurrentUser() user: AuthenticatedUser) {
+    return this.ordersService.checkout(user.id);
   }
 
+  // Ownership (SELLER may only act on their own SellerOrder; ADMIN is an
+  // explicit override) is enforced inside the service.
+  @Roles(UserRole.SELLER, UserRole.ADMIN)
   @Patch('seller-orders/:id/status')
   updateSellerOrderStatus(
     @Param('id') id: string,
+    @CurrentUser() user: AuthenticatedUser,
     @Body() dto: UpdateSellerOrderStatusDto,
   ) {
-    return this.ordersService.updateSellerOrderStatus(id, dto);
+    return this.ordersService.updateSellerOrderStatus(id, user, dto);
   }
 }

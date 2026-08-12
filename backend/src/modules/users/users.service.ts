@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import type { User } from '@prisma/client';
+import type { Prisma, User, UserRole } from '@prisma/client';
 import { UsersRepository } from './domain/users.repository';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -26,5 +26,15 @@ export class UsersService {
 
   update(id: string, dto: UpdateUserDto): Promise<User> {
     return this.usersRepository.update(id, dto);
+  }
+
+  // Only ever called from within SellersService.review's transaction —
+  // role is never set directly from a controller.
+  updateRole(
+    tx: Prisma.TransactionClient,
+    id: string,
+    role: UserRole,
+  ): Promise<User> {
+    return this.usersRepository.updateRole(tx, id, role);
   }
 }

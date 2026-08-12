@@ -1,5 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import type { SellerProfile, SellerProfileStatus } from '@prisma/client';
+import type {
+  Prisma,
+  SellerProfile,
+  SellerProfileStatus,
+} from '@prisma/client';
 import { PrismaService } from '../../../infrastructure/prisma/prisma.service';
 import { SellersRepository } from '../domain/sellers.repository';
 
@@ -24,11 +28,12 @@ export class PrismaSellersRepository implements SellersRepository {
   }
 
   updateStatus(
+    tx: Prisma.TransactionClient,
     id: string,
     status: SellerProfileStatus,
     reviewedByUserId: string,
   ): Promise<SellerProfile> {
-    return this.prisma.sellerProfile.update({
+    return tx.sellerProfile.update({
       where: { id },
       data: { status, reviewedByUserId, reviewedAt: new Date() },
     });
