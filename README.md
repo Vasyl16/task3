@@ -37,40 +37,58 @@ dependency trees, build tooling, and release lifecycles. A shared package
 will only be introduced under `shared/` if genuine duplication (e.g. common
 API/WebSocket event contract types) emerges — not preemptively.
 
-### Database
+## Infrastructure
 
-PostgreSQL is **remote** — it is never run via docker-compose and never
-hardcoded. Configure it via `DATABASE_URL` in `backend/.env` (see
-`backend/.env.example`). `docker-compose.yml` only provisions infrastructure
-that's appropriate to run locally: Redis (BullMQ) and Meilisearch (search
-index).
+`docker-compose.yml` provisions **only** the infra that's appropriate to
+run locally. Each service exists for a specific reason:
+
+- **Redis** — the backing store for **BullMQ**, the async job queue used
+  for anything that doesn't need to block the originating request:
+  Meilisearch index sync and WebSocket notification dispatch, both
+  triggered via the transactional outbox pattern (domain write + outbox
+  row commit together in Postgres; a relay then enqueues BullMQ jobs from
+  outbox rows). Redis holds no business-critical state — if it's flushed,
+  in-flight async jobs are lost but Postgres remains fully correct;
+  jobs would need to be re-triggered by re-running the outbox relay, not
+  by any manual data recovery.
+- **Meilisearch** — the search/read index for products. It is **not** a
+  source of truth: nothing in the application may depend on Meilisearch
+  being up-to-date, or even up, for anything other than the search feature
+  itself. It's rebuilt asynchronously from Postgres via the same
+  outbox → BullMQ pipeline.
+- **PostgreSQL is deliberately excluded and remote.** It is the single
+  source of truth for all business-critical state (users, vendors,
+  products, inventory, orders, auctions, bids, payments) and is never
+  containerized here, never defaulted to a local address, and never
+  hardcoded — only configured via `DATABASE_URL` in `backend/.env`
+  (provision a real remote/hosted Postgres instance yourself).
+
+Every value in `docker-compose.yml` (ports, Meilisearch's master key) has
+a working local-dev default via `${VAR:-default}` substitution, so
+`docker compose up -d` works immediately with no `.env` file required.
+Override any of them with a root-level `.env` file or exported shell env
+vars if you need non-default ports or a real master key locally.
 
 ## Getting Started
 
-### 1. Backend env (also used by docker-compose for Meilisearch's key)
-
-```bash
-cd backend
-cp .env.example .env   # fill in DATABASE_URL (remote Postgres) and other secrets
-npm install
-```
-
-### 2. Start local infrastructure (Redis + Meilisearch)
-
-From the repo root (reads `backend/.env` for `MEILI_MASTER_KEY`):
+### 1. Start local infrastructure (Redis + Meilisearch)
 
 ```bash
 docker compose up -d
 ```
 
-### 3. Run the backend
+### 2. Backend
 
 ```bash
 cd backend
+cp .env.example .env   # fill in DATABASE_URL (remote Postgres); MEILI_MASTER_KEY
+                        # must match whatever docker-compose used (default:
+                        # changeme_dev_master_key) if you didn't override it
+npm install
 npm run start:dev
 ```
 
-### 4. Frontend
+### 3. Frontend
 
 ```bash
 cd frontend

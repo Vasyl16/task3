@@ -1,23 +1,54 @@
+# Local development infrastructure only.
+#
+# PostgreSQL is intentionally NOT defined here — it is a remote/external
+# database (see backend/.env.example DATABASE_URL). Every write path that
+# matters for correctness goes through it; it is never run in a container
+# as part of this stack.
+#
+# All values below have working defaults, so `docker compose up -d` works
+# with zero setup. Override any of them via a root .env file or exported
+# shell env vars if needed (see README.md "Infrastructure" section).
 services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
     ports:
-      - '6379:6379'
+      - '${REDIS_PORT:-6379}:6379'
     volumes:
       - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
   meilisearch:
     image: getmeili/meilisearch:v1.11
     restart: unless-stopped
-    env_file:
-      - ./backend/.env
     environment:
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-changeme_dev_master_key}
       MEILI_ENV: development
     ports:
-      - '7700:7700'
+      - '${MEILISEARCH_PORT:-7700}:7700'
     volumes:
       - meilisearch-data:/meili_data
+    healthcheck:
+      # 127.0.0.1, not localhost — this image's wget resolves localhost to
+      # ::1 first, which isn't reachable, causing false-negative failures.
+      test:
+        [
+          'CMD',
+          'wget',
+          '--quiet',
+          '--spider',
+          '--tries=1',
+          'http://127.0.0.1:7700/health',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 volumes:
   redis-data:
