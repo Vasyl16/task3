@@ -1,0 +1,24 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis-data:/data
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.11
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      MEILI_ENV: development
+    ports:
+      - '7700:7700'
+    volumes:
+      - meilisearch-data:/meili_data
+
+volumes:
+  redis-data:
+  meilisearch-data:
