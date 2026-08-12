@@ -22,3 +22,12 @@ paths:
   once delivery (dedupe via `ProcessedEvent`). See the `database` skill.
 - Every controller input is a typed, `class-validator`-decorated DTO —
   no exceptions.
+- **Authentication ≠ authorization.** Every route requires a valid JWT by
+  default (global `JwtAuthGuard`) unless `@Public()`; `@Roles(...)` gates
+  by role only. Neither checks resource ownership — that's each
+  service's job. **Never trust a client-supplied `userId`/`sellerId`** —
+  identity comes only from `@CurrentUser()` (derived from the verified
+  JWT), and a seller's own resources are resolved via
+  `SellersService.getOwnApprovedSellerProfileOrThrow(userId)`, never a
+  request param. See the `backend-architecture` skill for the full
+  pattern and diagram.

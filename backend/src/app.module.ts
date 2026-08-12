@@ -31,9 +31,9 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
     CoreModule,
     PrismaModule,
     HealthModule,
-    // Business modules — see backend/CLAUDE.md for the dependency-direction
-    // rule (a module may only import ones that come before it here; no
-    // module may import one that imports it back).
+    // Business modules — see the backend-architecture skill for the
+    // dependency-direction rule (a module may only import ones that come
+    // before it here; no module may import one that imports it back).
     UsersModule,
     AuthModule,
     SellersModule,

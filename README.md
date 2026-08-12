@@ -192,15 +192,29 @@ implemented.
 
 ## Status
 
-This repository currently contains the **foundation**: scaffolded
-backend/frontend apps with layered structure (backend
-`config/core/infrastructure/modules`, frontend FSD), tooling
-(lint/format/test/build), local infra config, validated app configuration
-(env vars, required vs. optional, server-only vs. public), the initial
-Prisma domain model applied to the remote database, and the backend's
-NestJS module boundaries (controller/service/repository/DTO per module,
-see the `backend-architecture` skill) with basic CRUD wired end-to-end. Genuinely
-complex business logic (checkout, bid placement, order-status aggregation,
-refund resolution) is intentionally stubbed (`NotImplementedException`)
-pending its own task, and there's no authentication yet (no guards, no
-password hashing, no JWT issuance).
+This repository contains: scaffolded backend/frontend apps with layered
+structure (backend `config/core/infrastructure/modules`, frontend FSD),
+tooling (lint/format/test/build), local infra config, validated app
+configuration, the Prisma domain model applied to the remote database,
+and the backend's NestJS module boundaries with basic CRUD wired
+end-to-end.
+
+**Authentication & authorization are implemented**: JWT access/refresh
+tokens (rotation + reuse detection), roles (`CUSTOMER`/`SELLER`/`ADMIN`),
+global guards (`@Public()`/`@Roles()`), and ownership checks (IDOR
+prevention) on products, seller applications, and SellerOrders — see the
+`backend-architecture` skill's "Authentication & authorization" section.
+Google OAuth is wired (conditionally, only when configured) but untested
+against a real Google app.
+
+**The customer → seller → catalog workflow is implemented**: applying to
+become a seller, admin approve/reject (which grants/revokes the `SELLER`
+role atomically), and seller-owned product CRUD (create/update/archive)
+with `FIXED_PRICE`/`AUCTION` product types, server-side ownership
+enforcement, and soft-delete (archive, never physical delete) to avoid
+breaking existing carts/orders.
+
+Genuinely complex business logic (checkout, bid placement, order-status
+aggregation, refund resolution) is intentionally stubbed
+(`NotImplementedException`) pending its own task — see the relevant
+service files for exactly what each stub still needs to do.

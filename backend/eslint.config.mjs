@@ -36,4 +36,12 @@ export default tseslint.config(
       "prettier/prettier": ["error", { endOfLine: "auto" }],
     },
   },
+  {
+    // jest.fn()-based mocks trip this rule with false positives (it
+    // can't see through jest.Mocked<T>) — standard exemption for specs.
+    files: ['**/*.spec.ts'],
+    rules: {
+      '@typescript-eslint/unbound-method': 'off',
+    },
+  },
 );

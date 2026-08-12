@@ -21,8 +21,15 @@ datasource db {
 
 // ===================== Identity & Access =====================
 
+// CUSTOMER is the default for every new account. SELLER is granted (and
+// revoked) transactionally by SellersService whenever a SellerProfile
+// moves to/from APPROVED — see the sellers module's review flow. Kept as
+// a real role (not derived-on-read) so RolesGuard can check it directly
+// from the JWT payload without a DB hit; the accepted trade-off is up to
+// one access-token lifetime (15m) of staleness after a status change.
 enum UserRole {
-  BUYER
+  CUSTOMER
+  SELLER
   ADMIN
 }
 
@@ -32,15 +39,14 @@ model User {
   passwordHash String? // null for Google-OAuth-only accounts
   name         String
   avatarUrl    String?
-  role         UserRole @default(BUYER)
+  role         UserRole @default(CUSTOMER)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  // Seller capability is NOT a role flag — it's derived from having an
-  // APPROVED SellerProfile, to avoid two sources of truth that can drift.
   sellerProfile          SellerProfile?  @relation("SellerProfileOwner")
   sellerProfilesReviewed SellerProfile[] @relation("SellerProfileReviewer")
 
+  refreshTokens RefreshToken[]
   cart          Cart?
   orders        Order[]
   bids          Bid[]
@@ -54,6 +60,22 @@ model User {
   disputesResolved Dispute[] @relation("DisputeResolver")
 
   @@index([role])
+}
+
+// Refresh tokens are never stored in plaintext — only a SHA-256 hash, so
+// a DB leak doesn't hand out usable tokens. Each refresh rotates: the
+// presented token is revoked and a new one issued. Presenting an already-
+// revoked token is treated as a signal of theft (see AuthService.refresh).
+model RefreshToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
 }
 
 enum SellerProfileStatus {
@@ -111,6 +133,14 @@ enum ProductStatus {
   ARCHIVED
 }
 
+// AUCTION products are sold only via the bidding flow (see Auction) —
+// BiddingService rejects creating an auction for a FIXED_PRICE product,
+// and CartService rejects adding an AUCTION product to a cart.
+enum ProductType {
+  FIXED_PRICE
+  AUCTION
+}
+
 model Product {
   id          String        @id @default(uuid())
   sellerId    String
@@ -121,6 +151,7 @@ model Product {
   slug        String        @unique
   description String?
   basePrice   Decimal       @db.Decimal(12, 2)
+  type        ProductType   @default(FIXED_PRICE)
   status      ProductStatus @default(DRAFT)
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
