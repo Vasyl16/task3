@@ -1,0 +1,30 @@
+# Provisioned at container start, so Grafana comes up already wired to
+# both backends — no manual setup in the UI.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    uid: prometheus
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 10s
+
+  - name: Loki
+    type: loki
+    access: proxy
+    uid: loki
+    url: http://loki:3100
+    jsonData:
+      # Turns a correlationId in a log line into a clickable link that
+      # opens every other line sharing it — the trace, reconstructed
+      # from logs alone.
+      derivedFields:
+        - name: correlationId
+          matcherType: regex
+          matcherRegex: '"correlationId":"([^"]+)"'
+          url: '${__value.raw}'
+          datasourceUid: loki
+          urlDisplayLabel: 'Trace this operation'

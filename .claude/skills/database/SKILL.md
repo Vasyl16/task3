@@ -55,10 +55,61 @@ description: Prisma/PostgreSQL conventions and safety rules for this repo — sc
   (generic `aggregateType`/`aggregateId` strings) so it stays decoupled
   from whatever schema changes happen to specific entities later. Written
   in the SAME transaction as the domain change it describes.
+  `status`/`attempts`/`lastError`/`availableAt` are the retry/backoff
+  state the Outbox Publisher (`infrastructure/outbox/
+  outbox-publisher.service.ts`) uses to claim, publish-to-BullMQ, and
+  retry rows — see the `backend-architecture` skill for the full
+  pipeline.
 - `ProcessedEvent`'s unique `(eventId, consumerName)` is the idempotency
   guard for consumers — insert it before acting, treat a
-  unique-violation as "already handled, skip."
+  unique-violation as "already handled, skip." Use
+  `EventIdempotencyService`, don't reimplement this per consumer.
+- `IdempotencyKey`'s unique `(key, userId)` is a *different* guard — API
+  idempotency for a client-retried command (checkout/refund/bid), not an
+  event-consumer concern. `userId` is required (not nullable) precisely
+  because Postgres treats `NULL <> NULL` in a unique index, which would
+  silently defeat the guard for an unauthenticated key. Use
+  `IdempotencyKeyService`.
 - Every FK has an explicit `onDelete`: `Restrict` for anything that would
   corrupt financial/historical records, `Cascade` only for genuinely
   owned child rows (`CartItem`, `OrderItem`, `SellerOrder`), `SetNull`
   for optional references.
+
+## Analytics & reporting tables
+
+**There are no rollup/aggregation tables, and adding one needs a real
+argument.** Every reported figure is summed live from the transactional
+rows at request time (see `modules/analytics/`). The reason is not
+purity: a pre-aggregated total can drift from the rows it claims to
+describe — after a cancellation reverses a sale, after a backfill, after
+a consumer misses a message — and a financial figure that disagrees with
+the ledger is worse than a slow one. `LedgerEntry` already *is* the
+financial read model; it's append-only, written inside the business
+transaction, and indexed for period queries (`type, createdAt` and
+`sellerId, createdAt`).
+
+The one reporting-shaped table is **`CartSession`**, and only because
+checkout DELETES the cart's items (`CartRepository.clearCart`). Measuring
+cart→order conversion from `CartItem.addedAt` afterwards would count only
+the carts that DIDN'T convert — the converted ones leave no trace. So the
+funnel is recorded on the way in:
+
+- `CartService.addItem` opens a session if the cart has none open.
+- `CartService.completeCheckout` closes them against the order id, and
+  empties the cart, as one operation — splitting those two would let a
+  future caller empty a cart without recording the conversion, and there
+  is no way to reconstruct it after the fact.
+
+It is still **transactional truth, not an eventually-consistent
+projection**: both writes happen inside the caller's transaction, nothing
+derives it asynchronously, and no financial figure is read from it. Two
+genuinely concurrent add-to-cart calls can open two sessions for one
+cart; both are closed together at checkout so the ratio stays consistent.
+That imprecision is accepted deliberately — it's a funnel counter, not
+money.
+
+Money in aggregate queries: sum in Postgres `numeric`, cast to `::text`
+so it arrives as an exact decimal string, and fold it with `Decimal`
+(`modules/analytics/domain/revenue.ts`). Never let a currency sum pass
+through a JS float — and never label a period-bounded query without an
+index for it.

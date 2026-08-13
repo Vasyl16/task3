@@ -1,7 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import type { Notification } from '@prisma/client';
+import type { Prisma, Notification } from '@prisma/client';
 import { PrismaService } from '../../../infrastructure/prisma/prisma.service';
-import { NotificationsRepository } from '../domain/notifications.repository';
+import {
+  CreateNotificationInput,
+  NotificationsRepository,
+} from '../domain/notifications.repository';
 
 @Injectable()
 export class PrismaNotificationsRepository implements NotificationsRepository {
@@ -28,6 +31,21 @@ export class PrismaNotificationsRepository implements NotificationsRepository {
     return this.prisma.notification.update({
       where: { id },
       data: { readAt: new Date() },
+    });
+  }
+
+  create(
+    tx: Prisma.TransactionClient,
+    data: CreateNotificationInput,
+  ): Promise<Notification> {
+    return tx.notification.create({
+      data: {
+        userId: data.userId,
+        type: data.type,
+        title: data.title,
+        body: data.body,
+        data: data.data as Prisma.InputJsonValue,
+      },
     });
   }
 }

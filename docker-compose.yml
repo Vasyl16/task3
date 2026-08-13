@@ -1,13 +1,23 @@
-# Local development infrastructure only.
+# Two launch modes, one file (see README.md "Running the app"):
+#
+#   docker compose up -d                  -> infra only (hybrid mode);
+#                                            backend/frontend run on the
+#                                            host with hot reload.
+#   docker compose --profile full up -d   -> infra + backend + frontend,
+#                                            everything containerised.
+#
+# The app services below carry `profiles: ['full']`, which is what makes
+# that work: Compose skips a profiled service unless its profile is
+# explicitly enabled, so the plain `up` is unchanged by their presence.
 #
 # PostgreSQL is intentionally NOT defined here — it is a remote/external
 # database (see backend/.env.example DATABASE_URL). Every write path that
 # matters for correctness goes through it; it is never run in a container
-# as part of this stack.
+# as part of this stack. That holds in BOTH modes.
 #
-# All values below have working defaults, so `docker compose up -d` works
-# with zero setup. Override any of them via a root .env file or exported
-# shell env vars if needed (see README.md "Infrastructure" section).
+# All infra values below have working defaults, so `docker compose up -d`
+# works with zero setup. Override any of them via a root .env file or
+# exported shell env vars if needed (see README.md "Infrastructure").
 services:
   redis:
     image: redis:7-alpine
@@ -50,6 +60,169 @@ services:
       retries: 5
       start_period: 10s
 
+  # ===================== Application (full mode only) =====================
+  # Both services are inert unless --profile full is passed. They are
+  # production-style images (compiled backend, static frontend behind
+  # nginx) — deliberately NOT a containerised dev server with a mounted
+  # source tree, because the hybrid mode already covers hot reload and
+  # does it better. Use full mode to run the stack, hybrid mode to work
+  # on it.
+
+  backend:
+    profiles: ['full']
+    build:
+      context: ./backend
+    restart: unless-stopped
+    # Required in full mode: DATABASE_URL and the JWT secrets have no
+    # defaults, so compose fails loudly if backend/.env is missing.
+    # Secrets stay in that gitignored file — never in this one.
+    env_file:
+      - ./backend/.env
+    environment:
+      # `environment` overrides `env_file`. These three MUST be
+      # overridden: backend/.env points them at localhost, which inside
+      # a container means the container itself, not the host.
+      REDIS_URL: redis://redis:6379
+      MEILISEARCH_HOST: http://meilisearch:7700
+      # Pinned to the same expression that configures the meilisearch
+      # container above, so the two cannot drift apart — in full mode
+      # this wins over whatever backend/.env says.
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-changeme_dev_master_key}
+    ports:
+      - '${BACKEND_PORT:-3000}:3000'
+    volumes:
+      # The same host directory Promtail tails, so shipping logs to Loki
+      # works identically in both launch modes.
+      - ./backend/logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+      meilisearch:
+        condition: service_healthy
+    healthcheck:
+      # GET /health is @Public() and round-trips to Postgres, so this
+      # reports "can actually serve traffic", not merely "process is up".
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # One-off, never part of `up`: its own profile means it is only ever
+  # started by naming it explicitly —
+  #   docker compose --profile migrate run --rm migrate
+  # It exists so full mode needs no local Node toolchain to set up the
+  # schema. Applying a migration to the remote database stays a separate,
+  # deliberate command; nothing here runs it on boot.
+  migrate:
+    profiles: ['migrate']
+    build:
+      context: ./backend
+      target: migrate
+    env_file:
+      - ./backend/.env
+
+  frontend:
+    profiles: ['full']
+    build:
+      context: ./frontend
+      # Vite inlines these at BUILD time, so changing them requires
+      # `docker compose --profile full build frontend`, not a restart.
+      # They are public by definition — never put a secret here.
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:3000}
+        VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:3000}
+    restart: unless-stopped
+    # 5173 (Vite's dev port) on purpose: the origin is then identical in
+    # both launch modes, so the backend's CORS_ORIGIN needs no per-mode
+    # change.
+    ports:
+      - '${FRONTEND_PORT:-5173}:80'
+    depends_on:
+      backend:
+        condition: service_started
+
+  # ===================== Observability =====================
+  # Metrics come from the backend's /metrics endpoint (Prometheus);
+  # logs come from the JSON file it writes (Promtail -> Loki). Both are
+  # queried through Grafana, which is provisioned with the datasources
+  # and an overview dashboard already wired up — see observability/.
+  #
+  # Both collectors work unchanged in either launch mode, and neither
+  # needs to know which one is active. Prometheus always scrapes
+  # host.docker.internal:3000 — the backend listens there directly in
+  # hybrid mode, and via its published port in full mode. Promtail always
+  # tails ./backend/logs — the backend writes there directly in hybrid
+  # mode, and through the bind mount on the backend service in full mode.
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=7d'
+    ports:
+      - '${PROMETHEUS_PORT:-9090}:9090'
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    # Makes host.docker.internal resolve on Linux too (it already works
+    # on Docker Desktop). Without it, the scrape target is unreachable
+    # on a Linux host.
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+
+  loki:
+    image: grafana/loki:3.2.1
+    restart: unless-stopped
+    command: -config.file=/etc/loki/loki-config.yml
+    ports:
+      - '${LOKI_PORT:-3100}:3100'
+    volumes:
+      - ./observability/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+
+  promtail:
+    image: grafana/promtail:3.2.1
+    restart: unless-stopped
+    command: -config.file=/etc/promtail/promtail-config.yml
+    volumes:
+      - ./observability/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      # The backend's structured log output. Read-only: Promtail must
+      # never be able to modify or truncate the app's own logs.
+      - ./backend/logs:/var/log/marketplace:ro
+    depends_on:
+      - loki
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    restart: unless-stopped
+    environment:
+      # Anonymous admin access — local development only. This stack is
+      # not intended to be exposed anywhere.
+      GF_AUTH_ANONYMOUS_ENABLED: 'true'
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: 'true'
+      GF_USERS_DEFAULT_THEME: dark
+    ports:
+      - '${GRAFANA_PORT:-3001}:3000'
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+
 volumes:
   redis-data:
   meilisearch-data:
+  prometheus-data:
+  loki-data:
+  grafana-data:

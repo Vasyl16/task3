@@ -1,0 +1,18 @@
+node_modules
+dist
+coverage
+logs
+*.log
+
+# Never bake real secrets into an image layer. The container gets its
+# configuration at runtime via compose's env_file instead.
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+Dockerfile
+.dockerignore
+*.tsbuildinfo
+.DS_Store

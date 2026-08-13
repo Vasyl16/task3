@@ -6,7 +6,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { User } from '@prisma/client';
 import type { AppConfig } from '../../config/configuration';
 import { UsersService } from '../users/users.service';
@@ -119,8 +119,16 @@ export class AuthService {
         }),
       },
     );
+    // jti makes every issued refresh token unique. Without it the
+    // payload is just { sub }, and JWT's iat/exp have one-second
+    // granularity — so the same user authenticating twice within the
+    // same second produced a BYTE-IDENTICAL token, whose sha256 then
+    // collided with the stored tokenHash unique index and surfaced as a
+    // 500. That was reachable by a double-clicked login, two tabs, or a
+    // rotation immediately following a login, and it also meant a
+    // rotated token could be re-minted identical to the one it replaced.
     const refreshToken = this.jwtService.sign(
-      { sub: user.id },
+      { sub: user.id, jti: randomUUID() },
       {
         secret: this.getRefreshSecret(),
         expiresIn: this.configService.get('jwt.refreshExpiresIn', {

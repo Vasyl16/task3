@@ -7,6 +7,10 @@ import { envValidationSchema } from './config/env.validation';
 import { CoreModule } from './core/core.module';
 import { PrismaModule } from './infrastructure/prisma/prisma.module';
 import { HealthModule } from './infrastructure/health/health.module';
+import { MetricsModule } from './infrastructure/metrics/metrics.module';
+import { QueueModule } from './infrastructure/queue/queue.module';
+import { OutboxModule } from './infrastructure/outbox/outbox.module';
+import { RealtimeModule } from './infrastructure/realtime/realtime.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
 import { SellersModule } from './modules/sellers/sellers.module';
@@ -17,8 +21,10 @@ import { CartModule } from './modules/cart/cart.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { BiddingModule } from './modules/bidding/bidding.module';
 import { PaymentsLedgerModule } from './modules/payments-ledger/payments-ledger.module';
+import { DisputesModule } from './modules/disputes/disputes.module';
 import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
+import { AdminModule } from './modules/admin/admin.module';
 
 @Module({
   imports: [
@@ -31,6 +37,16 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
     CoreModule,
     PrismaModule,
     HealthModule,
+    // Global — exposes GET /metrics and the HTTP metrics interceptor.
+    MetricsModule,
+    QueueModule,
+    // Registers OutboxPublisherService (the claim-and-publish worker) once,
+    // app-wide — see infrastructure/outbox/outbox-publisher.service.ts.
+    OutboxModule,
+    // WebSocket fan-out. Listed with the infrastructure modules, not the
+    // business ones, because nothing depends on it and it depends on no
+    // business module — it only consumes outbox events.
+    RealtimeModule,
     // Business modules — see the backend-architecture skill for the
     // dependency-direction rule (a module may only import ones that come
     // before it here; no module may import one that imports it back).
@@ -43,9 +59,13 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
     BiddingModule,
     OrdersModule,
     PaymentsLedgerModule,
+    DisputesModule,
     SearchModule,
     AnalyticsModule,
     NotificationsModule,
+    // Last: the admin surface composes the modules above and nothing
+    // imports it back.
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -12,6 +12,13 @@ export interface AppConfig {
     host: string;
     masterKey: string | undefined;
   };
+  log: {
+    level: string;
+    // Mirror of the JSON log lines for Promtail to tail. Empty string
+    // disables the file sink — set it that way anywhere the process's
+    // stdout is already being collected.
+    file: string;
+  };
   jwt: {
     accessSecret: string | undefined;
     accessExpiresIn: string;
@@ -39,6 +46,10 @@ export default (): AppConfig => ({
   meilisearch: {
     host: process.env.MEILISEARCH_HOST ?? 'http://localhost:7700',
     masterKey: process.env.MEILI_MASTER_KEY,
+  },
+  log: {
+    level: process.env.LOG_LEVEL ?? 'info',
+    file: process.env.LOG_FILE ?? 'logs/app.log',
   },
   jwt: {
     accessSecret: process.env.JWT_ACCESS_SECRET,

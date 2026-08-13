@@ -1,0 +1,16 @@
+node_modules
+dist
+coverage
+
+# VITE_* vars are baked in at build time via build args instead, so the
+# image never needs (or should contain) a real .env file.
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+Dockerfile
+.dockerignore
+*.tsbuildinfo
+.DS_Store

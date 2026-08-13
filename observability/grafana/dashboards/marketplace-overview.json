@@ -1,0 +1,310 @@
+{
+  "uid": "marketplace-overview",
+  "title": "Marketplace Overview",
+  "tags": ["marketplace"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "correlationId",
+        "label": "Correlation ID",
+        "type": "textbox",
+        "query": "",
+        "current": { "text": "", "value": "" },
+        "description": "Paste a correlation ID to see every log line for that one operation, across HTTP, outbox, queue and workers."
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "HTTP",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Request rate by route",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (route) (rate(http_requests_total[1m]))",
+          "legendFormat": "{{route}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Error rate by status code",
+      "description": "5xx means the system is broken; 4xx usually means a client or business rule rejected the request.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (status_code) (rate(http_requests_total{status_code=~\"4..|5..\"}[1m]))",
+          "legendFormat": "{{status_code}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Request latency (p50 / p95 / p99)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Errors by exception type",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (error_type) (rate(http_errors_total[5m]))",
+          "legendFormat": "{{error_type}}"
+        }
+      ]
+    },
+
+    {
+      "type": "row",
+      "title": "Business — checkout & inventory",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Checkout outcomes",
+      "description": "'rejected' is a business rule firing (sold out, cart empty, product archived) and is normal. 'failed' is not.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 18 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (rate(marketplace_checkout_attempts_total[5m]))",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Checkout duration (p95)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 18 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(marketplace_checkout_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Orders placed (1h)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 18 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(marketplace_orders_placed_total[1h]))",
+          "legendFormat": "orders"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(marketplace_seller_orders_created_total[1h]))",
+          "legendFormat": "seller orders"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Inventory units moved",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (direction) (rate(marketplace_inventory_units_total[5m]))",
+          "legendFormat": "{{direction}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Gross order value rate",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(marketplace_order_value_total[5m]))",
+          "legendFormat": "value/s"
+        }
+      ]
+    },
+
+    {
+      "type": "row",
+      "title": "Business — auctions",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Bid outcomes",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 35 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (rate(marketplace_bids_total[5m]))",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Optimistic-locking conflicts on bids",
+      "description": "Version collisions that forced a retry. A sustained rise here is the signal that optimistic locking is under real contention and the strategy may need revisiting.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 35 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(marketplace_bid_version_conflicts_total[5m])",
+          "legendFormat": "conflicts/s"
+        }
+      ]
+    },
+
+    {
+      "type": "row",
+      "title": "Async pipeline — outbox, queues, websocket",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 43 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Outbox relay",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 44 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (event_type) (rate(outbox_events_published_total[5m]))",
+          "legendFormat": "published {{event_type}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(outbox_publish_failures_total[5m]))",
+          "legendFormat": "failures"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Queue jobs by outcome",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 44 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (queue, result) (rate(queue_jobs_total[5m]))",
+          "legendFormat": "{{queue}} {{result}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "WebSocket connections & broadcasts",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 44 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "websocket_connections_current",
+          "legendFormat": "open connections"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (event) (rate(websocket_broadcasts_total[5m]))",
+          "legendFormat": "{{event}}"
+        }
+      ]
+    },
+
+    {
+      "type": "row",
+      "title": "Logs",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 52 }
+    },
+    {
+      "type": "logs",
+      "title": "Trace one operation end to end",
+      "description": "Set the Correlation ID variable at the top. Every line below — HTTP handler, outbox relay, BullMQ worker, event handler — belongs to that single operation.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 53 },
+      "options": {
+        "showTime": true,
+        "sortOrder": "Ascending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{service=\"marketplace-backend\"} | json | correlationId = `$correlationId`",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
+      "type": "logs",
+      "title": "Recent errors and warnings",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 65 },
+      "options": {
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{service=\"marketplace-backend\", level=~\"error|warn\"}",
+          "queryType": "range"
+        }
+      ]
+    }
+  ]
+}

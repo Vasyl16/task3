@@ -1,7 +1,11 @@
 import { Global, MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
-import { APP_GUARD } from '@nestjs/core';
+import { ConfigService } from '@nestjs/config';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import type { AppConfig } from '../config/configuration';
 import { CorrelationIdMiddleware } from './correlation-id/correlation-id.middleware';
 import { CorrelationIdService } from './correlation-id/correlation-id.service';
+import { AppLogger } from './logging/app-logger.service';
+import { HttpObservabilityInterceptor } from './observability/http-observability.interceptor';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { RolesGuard } from './auth/guards/roles.guard';
 
@@ -17,6 +21,21 @@ import { RolesGuard } from './auth/guards/roles.guard';
   providers: [
     CorrelationIdService,
     CorrelationIdMiddleware,
+    // Built here rather than with @Injectable() alone because it needs
+    // config (level, file sink) at construction. Installed globally in
+    // main.ts via app.useLogger().
+    {
+      provide: AppLogger,
+      inject: [CorrelationIdService, ConfigService],
+      useFactory: (
+        correlationIdService: CorrelationIdService,
+        config: ConfigService<AppConfig, true>,
+      ) =>
+        new AppLogger(correlationIdService, {
+          level: config.get('log.level', { infer: true }),
+          filePath: config.get('log.file', { infer: true }),
+        }),
+    },
     JwtAuthGuard,
     RolesGuard,
     // Order matters: JwtAuthGuard populates req.user before RolesGuard
@@ -24,8 +43,12 @@ import { RolesGuard } from './auth/guards/roles.guard';
     // AuthModule) being loaded somewhere in the app.
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
+    // Emits the per-request metric AND access log. Runs after the
+    // guards, so req.user is populated and the log line can carry the
+    // authenticated userId.
+    { provide: APP_INTERCEPTOR, useClass: HttpObservabilityInterceptor },
   ],
-  exports: [CorrelationIdService],
+  exports: [CorrelationIdService, AppLogger],
 })
 export class CoreModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {

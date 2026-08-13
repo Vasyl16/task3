@@ -37,11 +37,23 @@ export default tseslint.config(
     },
   },
   {
-    // jest.fn()-based mocks trip this rule with false positives (it
-    // can't see through jest.Mocked<T>) — standard exemption for specs.
-    files: ['**/*.spec.ts'],
+    // jest.fn()-based mocks trip these rules with false positives: an
+    // untyped jest.fn() property in a mock object literal makes
+    // toHaveBeenCalledWith(...)'s argument position `any`, and
+    // expect.objectContaining()'s return type is itself `any` — neither
+    // reflects an actual type-safety issue in test code. unbound-method
+    // similarly can't see through jest.Mocked<T>. supertest's
+    // `res.body` is genuinely `any` (no response-shape generics), which
+    // is exactly what e2e specs need to inspect. Standard exemption for
+    // specs; production code still enforces all of these. `*spec.ts`
+    // (no leading dot) matches both `*.spec.ts` and `*.e2e-spec.ts`.
+    files: ['**/*spec.ts'],
     rules: {
       '@typescript-eslint/unbound-method': 'off',
+      '@typescript-eslint/no-unsafe-assignment': 'off',
+      '@typescript-eslint/no-unsafe-member-access': 'off',
+      '@typescript-eslint/no-unsafe-call': 'off',
+      '@typescript-eslint/no-unsafe-argument': 'off',
     },
   },
 );

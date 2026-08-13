@@ -1,28 +1,50 @@
-import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+} from '@nestjs/common';
+import { CurrentUser } from '../../core/auth/decorators/current-user.decorator';
+import type { AuthenticatedUser } from '../../core/auth/authenticated-user.interface';
 import { CartService } from './cart.service';
 import { AddCartItemDto } from './dto/add-cart-item.dto';
+import { UpdateCartItemDto } from './dto/update-cart-item.dto';
 
-// TODO(auth): buyerId should come from the authenticated caller, not a
-// path param — every route here is an IDOR risk until then.
+// buyerId always comes from @CurrentUser() (the verified JWT), never
+// from a request param — every route here is scoped to the caller's own
+// cart by construction, so there's no ownership check to write (there is
+// nothing else it could operate on).
 @Controller('cart')
 export class CartController {
   constructor(private readonly cartService: CartService) {}
 
-  @Get(':buyerId')
-  getCart(@Param('buyerId') buyerId: string) {
-    return this.cartService.getOrCreateForBuyer(buyerId);
+  @Get()
+  getCart(@CurrentUser() user: AuthenticatedUser) {
+    return this.cartService.getOrCreateForBuyer(user.id);
   }
 
-  @Post(':buyerId/items')
-  addItem(@Param('buyerId') buyerId: string, @Body() dto: AddCartItemDto) {
-    return this.cartService.addItem(buyerId, dto);
+  @Post('items')
+  addItem(@CurrentUser() user: AuthenticatedUser, @Body() dto: AddCartItemDto) {
+    return this.cartService.addItem(user.id, dto);
   }
 
-  @Delete(':buyerId/items/:productId')
+  @Patch('items/:productId')
+  updateItemQuantity(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('productId') productId: string,
+    @Body() dto: UpdateCartItemDto,
+  ) {
+    return this.cartService.updateItemQuantity(user.id, productId, dto);
+  }
+
+  @Delete('items/:productId')
   removeItem(
-    @Param('buyerId') buyerId: string,
+    @CurrentUser() user: AuthenticatedUser,
     @Param('productId') productId: string,
   ) {
-    return this.cartService.removeItem(buyerId, productId);
+    return this.cartService.removeItem(user.id, productId);
   }
 }

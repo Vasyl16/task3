@@ -1,7 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import type { Auction, Bid } from '@prisma/client';
+import type { Auction, AuctionStatus, Bid, Prisma } from '@prisma/client';
 import { PrismaService } from '../../../infrastructure/prisma/prisma.service';
-import { BiddingRepository } from '../domain/bidding.repository';
+import {
+  BiddingRepository,
+  CreateAuctionInput,
+} from '../domain/bidding.repository';
 
 @Injectable()
 export class PrismaBiddingRepository implements BiddingRepository {
@@ -24,13 +27,7 @@ export class PrismaBiddingRepository implements BiddingRepository {
     });
   }
 
-  createAuction(data: {
-    productId: string;
-    sellerId: string;
-    startingPrice: number;
-    startsAt: Date;
-    endsAt: Date;
-  }): Promise<Auction> {
+  createAuction(data: CreateAuctionInput): Promise<Auction> {
     return this.prisma.auction.create({ data });
   }
 
@@ -39,5 +36,51 @@ export class PrismaBiddingRepository implements BiddingRepository {
       where: { auctionId },
       orderBy: { amount: 'desc' },
     });
+  }
+
+  async tryAcceptBid(
+    tx: Prisma.TransactionClient,
+    input: {
+      auctionId: string;
+      expectedVersion: number;
+      bidderId: string;
+      amount: number;
+    },
+  ): Promise<Bid | null> {
+    const result = await tx.auction.updateMany({
+      where: { id: input.auctionId, version: input.expectedVersion },
+      data: {
+        currentHighestBid: input.amount,
+        currentHighestBidderId: input.bidderId,
+        version: { increment: 1 },
+      },
+    });
+    if (result.count === 0) {
+      return null;
+    }
+    return tx.bid.create({
+      data: {
+        auctionId: input.auctionId,
+        bidderId: input.bidderId,
+        amount: input.amount,
+      },
+    });
+  }
+
+  async transitionStatusIfCurrent(
+    tx: Prisma.TransactionClient,
+    id: string,
+    expectedCurrent: AuctionStatus,
+    next: AuctionStatus,
+    extra?: Partial<{ checkoutDeadline: Date | null }>,
+  ): Promise<Auction | null> {
+    const result = await tx.auction.updateMany({
+      where: { id, status: expectedCurrent },
+      data: { status: next, ...extra },
+    });
+    if (result.count === 0) {
+      return null;
+    }
+    return tx.auction.findUniqueOrThrow({ where: { id } });
   }
 }

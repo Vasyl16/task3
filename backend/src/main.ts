@@ -3,12 +3,23 @@ import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import type { AppConfig } from './config/configuration';
+import { AppLogger } from './core/logging/app-logger.service';
+import { ConfiguredIoAdapter } from './infrastructure/realtime/realtime.adapter';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // bufferLogs holds Nest's own bootstrap logs until useLogger() below,
+  // so even framework startup lines come out as structured JSON rather
+  // than the default pretty format.
+  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  app.useLogger(app.get(AppLogger));
+
   const configService = app.get(ConfigService<AppConfig, true>);
 
-  app.enableCors({ origin: configService.get('corsOrigin', { infer: true }) });
+  const corsOrigin = configService.get('corsOrigin', { infer: true });
+  app.enableCors({ origin: corsOrigin });
+  // Same origin policy for the Socket.IO handshake as for REST — see
+  // ConfiguredIoAdapter for why this isn't on the gateway decorator.
+  app.useWebSocketAdapter(new ConfiguredIoAdapter(app, corsOrigin));
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -19,4 +30,6 @@ async function bootstrap() {
 
   await app.listen(configService.get('port', { infer: true }));
 }
-bootstrap();
+// void: bootstrap() is the process entrypoint — there is no caller to
+// hand the promise to, and an unhandled rejection here should crash.
+void bootstrap();

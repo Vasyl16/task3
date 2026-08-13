@@ -1,4 +1,15 @@
 {
   "extends": "./tsconfig.json",
-  "exclude": ["node_modules", "test", "dist", "**/*spec.ts"]
+  // prisma.config.ts is Prisma CLI configuration, not application code —
+  // the running app never imports it. Excluding it matters beyond tidiness:
+  // as the only .ts file outside src/, it widened the inferred rootDir to
+  // the project root, so `nest build` emitted dist/src/main.js and the
+  // `start:prod` script (`node dist/main`) could not find its entrypoint.
+  "exclude": [
+    "node_modules",
+    "test",
+    "dist",
+    "**/*spec.ts",
+    "prisma.config.ts"
+  ]
 }

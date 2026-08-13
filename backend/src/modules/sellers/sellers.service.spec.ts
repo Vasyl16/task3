@@ -40,6 +40,7 @@ describe('SellersService', () => {
       findByUserId: jest.fn(),
       create: jest.fn(),
       updateStatus: jest.fn(),
+      findMany: jest.fn(),
     };
     usersService = {
       updateRole: jest.fn(),
@@ -84,6 +85,29 @@ describe('SellersService', () => {
         sellersService.apply('user-1', { businessName: 'Alice Shop' }),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(sellersRepository.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('listApplications (admin moderation queue)', () => {
+    it('passes the status filter through so PENDING is the review queue', async () => {
+      sellersRepository.findMany.mockResolvedValue([]);
+
+      await sellersService.listApplications({
+        status: SellerProfileStatus.PENDING,
+      });
+
+      expect(sellersRepository.findMany).toHaveBeenCalledWith({
+        status: SellerProfileStatus.PENDING,
+      });
+    });
+
+    it('returns every application when no status is given', async () => {
+      sellersRepository.findMany.mockResolvedValue([buildProfile()]);
+
+      const result = await sellersService.listApplications({});
+
+      expect(result).toHaveLength(1);
+      expect(sellersRepository.findMany).toHaveBeenCalledWith({});
     });
   });
 

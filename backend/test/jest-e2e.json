@@ -6,5 +6,7 @@
   "transform": {
     "^.+\\.(t|j)s$": "ts-jest"
   },
-  "setupFiles": ["<rootDir>/jest-e2e-setup.ts"]
+  "setupFiles": ["<rootDir>/jest-e2e-setup.ts"],
+  "testTimeout": 20000,
+  "forceExit": true
 }

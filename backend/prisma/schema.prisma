@@ -10,6 +10,11 @@
 //   gateway integration is a separate future concern.
 // - No CQRS/read-model tables — Meilisearch (outside Postgres) is the
 //   only read model, kept eventually consistent via OutboxEvent.
+//   Analytics deliberately does NOT add pre-aggregated rollup tables: it
+//   sums LedgerEntry/OrderItem live, so a reported figure can never drift
+//   from the transactional rows it came from. CartSession is the one
+//   reporting-shaped table, and only because checkout DELETES cart items
+//   — see its comment; it is still written transactionally, not derived.
 
 generator client {
   provider = "prisma-client-js"
@@ -45,6 +50,7 @@ model User {
 
   sellerProfile          SellerProfile?  @relation("SellerProfileOwner")
   sellerProfilesReviewed SellerProfile[] @relation("SellerProfileReviewer")
+  productsModerated      Product[]       @relation("ProductModerator")
 
   refreshTokens RefreshToken[]
   cart          Cart?
@@ -156,6 +162,18 @@ model Product {
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
 
+  // Reactive moderation audit trail — set only when an ADMIN takes a
+  // listing down or reinstates it (see ProductsService.moderate). There
+  // is deliberately no pre-publication approval state: nothing in the
+  // spec requires sellers to wait for a human before listing, and adding
+  // a mandatory review gate would change checkout/search behaviour for
+  // every product. status stays the single source of truth for
+  // visibility; these three columns only record who/when/why.
+  moderatedByUserId String?
+  moderatedByUser   User?     @relation("ProductModerator", fields: [moderatedByUserId], references: [id], onDelete: SetNull)
+  moderatedAt       DateTime?
+  moderationNote    String?
+
   inventory  Inventory?
   auctions   Auction[]
   cartItems  CartItem[]
@@ -179,10 +197,17 @@ model Inventory {
 
 // ===================== Auctions =====================
 
+// ENDED: deadline reached, winner determined (if any bid exists), the
+// winner's checkoutDeadline window is open. COMPLETED: winner checked
+// out. EXPIRED: either no bids were ever placed, or the winner didn't
+// check out within the window — see BiddingService.endAuction /
+// expireCheckoutWindowIfUnclaimed.
 enum AuctionStatus {
   SCHEDULED
   ACTIVE
   ENDED
+  COMPLETED
+  EXPIRED
   CANCELLED
 }
 
@@ -196,7 +221,11 @@ model Auction {
   sellerId  String
   seller    SellerProfile @relation(fields: [sellerId], references: [id], onDelete: Restrict)
 
-  startingPrice Decimal @db.Decimal(12, 2)
+  startingPrice   Decimal @db.Decimal(12, 2)
+  // Minimum amount a new bid must exceed the current highest bid by (or
+  // the starting price, for the first bid) — see
+  // BiddingService.computeMinAcceptableBid.
+  minBidIncrement Decimal @db.Decimal(12, 2)
 
   // Denormalized current-winner cache, updated transactionally with each
   // accepted bid — avoids a join for the common "show current price" read.
@@ -204,12 +233,17 @@ model Auction {
   currentHighestBidderId String?
   currentHighestBidder   User?    @relation("AuctionWinner", fields: [currentHighestBidderId], references: [id], onDelete: SetNull)
 
-  status    AuctionStatus @default(SCHEDULED)
-  version   Int           @default(0)
-  startsAt  DateTime
-  endsAt    DateTime
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @updatedAt
+  status           AuctionStatus @default(SCHEDULED)
+  version          Int           @default(0)
+  startsAt         DateTime
+  endsAt           DateTime
+  // Set when the auction ENDS with a winner — the winner must complete
+  // checkout by this time or the auction is EXPIRED instead (both
+  // transitions driven by delayed BullMQ jobs scheduled at auction
+  // creation — see AuctionDeadlineConsumer).
+  checkoutDeadline DateTime?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
 
   bids Bid[]
 
@@ -244,7 +278,42 @@ model Cart {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  items CartItem[]
+  items    CartItem[]
+  sessions CartSession[]
+}
+
+// The cart→order conversion funnel. CartItem rows are DELETED at checkout
+// (see CartRepository.clearCart), so a converted cart leaves no trace in
+// CartItem — measuring conversion from CartItem.addedAt would count only
+// the carts that DIDN'T convert. This table is the durable record.
+//
+// One row per cart "session": the window from the moment an item lands in
+// an empty cart until that cart is checked out (or never). Written inside
+// the SAME transaction as the cart mutation / checkout it records, so it
+// is transactional Postgres truth, NOT an eventually-consistent
+// projection — nothing here is derived asynchronously, and no financial
+// figure is read from it.
+//
+// Known imprecision: two genuinely concurrent "add to empty cart" calls
+// from one buyer can open two sessions. Both are then closed together at
+// checkout, so numerator and denominator move as a pair and the ratio
+// stays sane. Not worth a lock on an analytics funnel counter.
+model CartSession {
+  id        String   @id @default(uuid())
+  cartId    String
+  cart      Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  buyerId   String
+  startedAt DateTime @default(now())
+
+  // Null until this session converts. orderId is not a relation — the
+  // funnel record must survive independently of order retention.
+  orderId     String?
+  convertedAt DateTime?
+
+  // Supports "find this cart's open session" (the hot path, on every
+  // add-to-cart) and the period-bounded cohort query analytics runs.
+  @@index([cartId, convertedAt])
+  @@index([startedAt])
 }
 
 model CartItem {
@@ -264,11 +333,14 @@ model CartItem {
 
 // Parent Order status is DERIVED from its SellerOrders — recomputed
 // synchronously, in the same transaction as the SellerOrder status change
-// that triggers it (see ../CLAUDE.md). Never written independently.
+// that triggers it (see ../CLAUDE.md and
+// OrdersService/order-status-aggregation.ts for the exact rules).
 enum OrderStatus {
-  PENDING
-  PARTIALLY_FULFILLED
-  FULFILLED
+  NEW
+  PROCESSING
+  PARTIALLY_SHIPPED
+  SHIPPED
+  COMPLETED
   PARTIALLY_CANCELLED
   CANCELLED
 }
@@ -277,7 +349,7 @@ model Order {
   id          String      @id @default(uuid())
   buyerId     String
   buyer       User        @relation(fields: [buyerId], references: [id], onDelete: Restrict)
-  status      OrderStatus @default(PENDING)
+  status      OrderStatus @default(NEW)
   totalAmount Decimal     @db.Decimal(12, 2)
   placedAt    DateTime    @default(now())
   createdAt   DateTime    @default(now())
@@ -287,16 +359,25 @@ model Order {
 
   @@index([buyerId])
   @@index([status])
+  // Every analytics query is period-bounded; without this each one is a
+  // full scan of the orders table.
+  @@index([placedAt])
 }
 
 // Independent per-seller lifecycle — a multi-vendor Order decomposes into
-// one SellerOrder per seller, each moving through CONFIRMED/SHIPPED/etc.
-// on its own; the parent Order never has its own independent status.
+// one SellerOrder per seller, each moving through its own states; the
+// parent Order never has its own independently-set status (see
+// OrderStatus above). Valid transitions (see
+// order-status-transitions.ts): NEW -> PROCESSING -> SHIPPED ->
+// COMPLETED, or NEW|PROCESSING -> CANCELLED. REFUNDED is a legacy value
+// no longer produced by application logic — a refund is tracked via the
+// separate Refund model, not a SellerOrder status — kept only because
+// Postgres enums can't remove a value once created.
 enum SellerOrderStatus {
-  PENDING
-  CONFIRMED
+  NEW
+  PROCESSING
   SHIPPED
-  DELIVERED
+  COMPLETED
   CANCELLED
   REFUNDED
 }
@@ -307,7 +388,7 @@ model SellerOrder {
   order       Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
   sellerId    String
   seller      SellerProfile     @relation(fields: [sellerId], references: [id], onDelete: Restrict)
-  status      SellerOrderStatus @default(PENDING)
+  status      SellerOrderStatus @default(NEW)
   subtotal    Decimal           @db.Decimal(12, 2)
   shippingFee Decimal           @default(0) @db.Decimal(12, 2)
   createdAt   DateTime          @default(now())
@@ -322,6 +403,7 @@ model SellerOrder {
   @@index([orderId])
   @@index([sellerId])
   @@index([status])
+  @@index([createdAt])
 }
 
 model OrderItem {
@@ -364,6 +446,11 @@ model LedgerEntry {
   @@index([sellerId])
   @@index([sellerOrderId])
   @@index([type])
+  // The ledger IS the financial read model — every revenue figure in
+  // analytics is a period-bounded SUM over it, either across the whole
+  // platform (type, createdAt) or for one seller (sellerId, createdAt).
+  @@index([type, createdAt])
+  @@index([sellerId, createdAt])
 }
 
 enum RefundStatus {
@@ -406,6 +493,13 @@ enum OutboxEventStatus {
 // aggregateId are plain strings so the outbox stays generic and decoupled
 // from whatever schema changes happen to specific entities later.
 // Written in the SAME transaction as the domain change it describes.
+//
+// status lifecycle (see OutboxPublisherService):
+//   PENDING -> PROCESSING (claimed by a publisher, SKIP LOCKED) ->
+//   PUBLISHED (BullMQ enqueue confirmed) | PENDING (enqueue failed,
+//   requeued with backoff via availableAt) | FAILED (attempts exhausted).
+// A PROCESSING row whose updatedAt is stale (publisher crashed after
+// claiming) is reclaimed by the next poll — never stuck forever.
 model OutboxEvent {
   id            String            @id @default(uuid())
   aggregateType String
@@ -415,12 +509,17 @@ model OutboxEvent {
   correlationId String
   status        OutboxEventStatus @default(PENDING)
   attempts      Int               @default(0)
+  lastError     String?
+  // Not eligible for (re)publishing until now >= availableAt — used for
+  // exponential backoff between retry attempts.
+  availableAt   DateTime          @default(now())
   createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
   processedAt   DateTime?
 
   processedBy ProcessedEvent[]
 
-  @@index([status, createdAt])
+  @@index([status, availableAt])
   @@index([correlationId])
   @@index([aggregateType, aggregateId])
 }
@@ -436,6 +535,38 @@ model ProcessedEvent {
   processedAt  DateTime    @default(now())
 
   @@unique([eventId, consumerName])
+}
+
+enum IdempotencyKeyStatus {
+  PROCESSING
+  COMPLETED
+}
+
+// API idempotency (distinct from ProcessedEvent above, which is for
+// EVENT-consumer idempotency): a client-supplied Idempotency-Key header
+// for a command like checkout/refund/bid. The unique (key, userId) is
+// the concurrency guard — a second request with the same key fails the
+// insert with a unique violation while the first is still PROCESSING,
+// rather than racing it. userId is required (not optional): Postgres
+// unique indexes treat NULL as distinct from NULL, which would silently
+// defeat this guard for anonymous callers — every command this backs
+// (checkout/refund/bid) requires authentication anyway, so there's no
+// legitimate anonymous case to support.
+model IdempotencyKey {
+  id             String               @id @default(uuid())
+  key            String
+  userId         String
+  // Hash of the request body/route, so the same key reused for a
+  // genuinely different request is rejected instead of silently
+  // returning the wrong stored response.
+  requestHash    String
+  status         IdempotencyKeyStatus @default(PROCESSING)
+  responseStatus Int?
+  responseBody   Json?
+  createdAt      DateTime             @default(now())
+  completedAt    DateTime?
+
+  @@unique([key, userId])
 }
 
 // ===================== Notifications =====================

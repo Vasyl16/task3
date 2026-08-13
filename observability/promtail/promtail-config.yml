@@ -1,0 +1,57 @@
+# Tails the backend's JSON log file and ships it to Loki.
+#
+# The backend writes newline-delimited JSON to LOG_FILE (default
+# backend/logs/app.log — see backend/src/core/logging/app-logger.service.ts),
+# and docker-compose mounts that directory in read-only. The file rather
+# than container stdout is the source because it is the one thing both
+# launch modes have in common: on the host the backend writes it
+# directly, and in full mode the backend container writes into the same
+# bind-mounted directory. One config, no per-mode branch.
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: warn
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: marketplace-backend
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: marketplace-backend
+          service: marketplace-backend
+          __path__: /var/log/marketplace/*.log
+
+    pipeline_stages:
+      # Parse the JSON line so individual fields become available to the
+      # stages below.
+      - json:
+          expressions:
+            level: level
+            event: event
+            context: context
+            correlationId: correlationId
+            timestamp: timestamp
+
+      # Use the app's own timestamp rather than ingestion time, so a
+      # burst that arrives late still lands in the right place on the
+      # time axis.
+      - timestamp:
+          source: timestamp
+          format: RFC3339Nano
+
+      # Only LOW-cardinality fields become Loki labels. correlationId is
+      # deliberately NOT a label: it is unique per request, and labelling
+      # by it would create a separate stream per request and destroy
+      # Loki's index. It stays inside the log line, where
+      # `| json | correlationId = "..."` filters on it perfectly well —
+      # which is exactly how you trace one operation end to end.
+      - labels:
+          level:
+          event:
+          context:

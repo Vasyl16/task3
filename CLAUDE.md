@@ -15,7 +15,7 @@ Rules and skills live in `.claude/`:
 - `.claude/rules/testing.md` — path-scoped to test files; what always
   needs a test.
 - `.claude/skills/` — deeper reference material (`backend-architecture`,
-  `frontend-architecture`, `database`, `testing`,
+  `frontend-architecture`, `database`, `testing`, `observability`,
   `code-review-checklist`), loaded on demand rather than every session.
 
 See `README.md` for repository structure, infrastructure, environment

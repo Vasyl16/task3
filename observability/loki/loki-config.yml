@@ -1,0 +1,44 @@
+# Single-binary Loki with filesystem storage — appropriate for local
+# development only. A real deployment would use object storage and a
+# retention policy; nothing here is tuned for durability.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # Dev convenience: the backend log file may contain lines from an
+  # earlier run, and Loki rejects entries older than this window by
+  # default. Without it, restarting the stack silently drops history.
+  reject_old_samples: false
+  allow_structured_metadata: true
+
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /loki/rules

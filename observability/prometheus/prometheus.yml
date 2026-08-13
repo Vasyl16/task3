@@ -1,0 +1,33 @@
+# Scrapes the backend's /metrics endpoint (see
+# backend/src/infrastructure/metrics/).
+#
+# One target covers BOTH launch modes (see README "Running the app"),
+# because in each of them the backend is listening on port 3000 of the
+# host: directly in hybrid mode (npm run start:dev), and via the
+# container's published port in full mode. host.docker.internal is how a
+# container reaches the host on Docker Desktop; the extra_hosts entry in
+# docker-compose.yml makes the same name resolve on Linux too.
+#
+# Deliberately NOT also listing the `backend` compose service by name.
+# In full mode both names reach the same process, so Prometheus would
+# scrape it twice under two different `instance` labels — silently
+# double-counting every counter in any dashboard query that sums across
+# instances.
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: marketplace-backend
+    metrics_path: /metrics
+    static_configs:
+      # Literal, not ${PORT}: Prometheus does not expand environment
+      # variables in scrape configs. If the backend's PORT is changed
+      # from the default, change it here too.
+      - targets: ['host.docker.internal:3000']
+        labels:
+          service: marketplace-backend
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

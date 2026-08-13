@@ -10,17 +10,22 @@ separately.
 ```
 .
 ├── backend/            # NestJS + TypeScript API (modular monolith)
+│   ├── Dockerfile       # full-mode image (compiled app; + a migrate stage)
 │   ├── prisma/
 │   │   ├── schema.prisma # domain model (PostgreSQL, remote — see "Database" below)
 │   │   └── migrations/    # tracked migration history
 │   └── src/
 │       ├── config/         # env var loading (@nestjs/config)
-│       ├── core/           # cross-cutting app-wide providers (correlation IDs)
-│       ├── infrastructure/ # shared plumbing: Prisma client, outbox, health
+│       ├── core/           # cross-cutting providers (correlation IDs,
+│       │                    # structured logger, HTTP observability)
+│       ├── infrastructure/ # shared plumbing: Prisma, outbox, queue,
+│       │                    # realtime, metrics, health
 │       └── modules/        # one NestJS module per domain boundary — see
 │                            # the backend-architecture skill for the
 │                            # layout and dependency-direction rules
 ├── frontend/           # React + TypeScript app (Vite), Feature-Sliced Design
+│   ├── Dockerfile       # full-mode image (static build served by nginx)
+│   ├── nginx.conf       # SPA fallback + asset caching for that image
 │   └── src/
 │       ├── app/          # root component, providers, global styles, routing
 │       ├── pages/        # route-level compositions
@@ -28,13 +33,20 @@ separately.
 │       ├── features/      # user-facing interactions (add-to-cart, place-bid, ...)
 │       ├── entities/      # business entities (data shape, API, minimal display)
 │       └── shared/        # business-agnostic reusable code (UI kit, API client, assets)
-├── docker-compose.yml  # Local infra: Redis + Meilisearch only
+├── observability/      # Configs for the local metrics/logs stack
+│   ├── prometheus/      # scrape config (targets the host's /metrics)
+│   ├── loki/            # single-binary Loki config
+│   ├── promtail/        # tails backend/logs/*.log -> Loki
+│   └── grafana/         # provisioned datasources + overview dashboard
+├── docker-compose.yml  # Infra: Redis, Meilisearch, Prometheus, Loki,
+│                        # Promtail, Grafana — plus backend/frontend
+│                        # behind the `full` profile (see "Running the app")
 └── .claude/
     ├── rules/            # always-on / path-scoped rules (general, backend,
     │                      # frontend, testing) — see CLAUDE.md
     └── skills/           # on-demand reference (backend-architecture,
                            # frontend-architecture, database, testing,
-                           # code-review-checklist)
+                           # observability, code-review-checklist)
 ```
 
 Backend layering, dependency direction, and FSD import-direction rules
@@ -51,8 +63,10 @@ API/WebSocket event contract types) emerges — not preemptively.
 
 ## Infrastructure
 
-`docker-compose.yml` provisions **only** the infra that's appropriate to
-run locally. Each service exists for a specific reason:
+`docker-compose.yml` provisions the infra that's appropriate to run
+locally, and — behind the opt-in `full` profile — the backend and
+frontend themselves (see "Running the app"). Each infra service exists
+for a specific reason:
 
 - **Redis** — the backing store for **BullMQ**, the async job queue used
   for anything that doesn't need to block the originating request:
@@ -68,6 +82,12 @@ run locally. Each service exists for a specific reason:
   being up-to-date, or even up, for anything other than the search feature
   itself. It's rebuilt asynchronously from Postgres via the same
   outbox → BullMQ pipeline.
+- **Prometheus + Loki + Promtail + Grafana** — the observability stack.
+  Prometheus scrapes the backend's `/metrics`; Promtail tails the JSON
+  log file the backend writes and ships it to Loki; Grafana queries both
+  and comes up pre-provisioned with an overview dashboard (no UI setup).
+  Like the backend itself, none of this holds business-critical state —
+  it is observation only. See the `.claude/skills/observability` skill.
 - **PostgreSQL is deliberately excluded and remote.** It is the single
   source of truth for all business-critical state (users, vendors,
   products, inventory, orders, auctions, bids, payments) and is never
@@ -75,11 +95,15 @@ run locally. Each service exists for a specific reason:
   hardcoded — only configured via `DATABASE_URL` in `backend/.env`
   (provision a real remote/hosted Postgres instance yourself).
 
-Every value in `docker-compose.yml` (ports, Meilisearch's master key) has
-a working local-dev default via `${VAR:-default}` substitution, so
-`docker compose up -d` works immediately with no `.env` file required.
-Override any of them with a root-level `.env` file or exported shell env
-vars if you need non-default ports or a real master key locally.
+Every **infra** value in `docker-compose.yml` (ports, Meilisearch's
+master key) has a working local-dev default via `${VAR:-default}`
+substitution, so `docker compose up -d` works immediately with no `.env`
+file required. Override any of them with a root-level `.env` file or
+exported shell env vars if you need non-default ports or a real master
+key locally. The `full` profile is the exception: the backend service
+reads `backend/.env`, which must exist and supply `DATABASE_URL` and the
+JWT secrets. Those are secrets, so they stay in that gitignored file and
+are never inlined into `docker-compose.yml`.
 
 ## Database (Prisma)
 
@@ -130,6 +154,7 @@ if something required is missing or malformed — see
 | `PORT`, `CORS_ORIGIN`, `NODE_ENV` | Optional | App-level defaults |
 | `REDIS_URL` | Optional | Defaults to the local docker-compose Redis |
 | `MEILISEARCH_HOST`, `MEILI_MASTER_KEY` | Optional | Defaults to the local docker-compose Meilisearch |
+| `LOG_LEVEL`, `LOG_FILE` | Optional | Structured-log level, and the file Promtail tails (`LOG_FILE=` disables the file sink) |
 | `JWT_ACCESS_EXPIRES_IN` / `JWT_REFRESH_EXPIRES_IN` | Optional | Token lifetimes |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_CALLBACK_URL` | Optional (placeholders) | Not wired up yet |
 
@@ -138,35 +163,138 @@ if something required is missing or malformed — see
 | Variable | Required? | Purpose |
 | --- | --- | --- |
 | `VITE_API_URL` | Required | Backend REST base URL |
-| `VITE_WS_URL` | Required | Backend WebSocket base URL |
+| `VITE_WS_URL` | Required | Backend WebSocket base URL — the gateway lives on the `/realtime` Socket.IO namespace |
 
-## Getting Started
+## Running the app
 
-### 1. Start local infrastructure (Redis + Meilisearch)
+There are two supported ways to launch, and they share one
+`docker-compose.yml`. Pick by what you're doing:
+
+| | **Full — everything in Docker** | **Hybrid — infra in Docker, apps on the host** |
+| --- | --- | --- |
+| Command | `docker compose --profile full up -d` | `docker compose up -d`, then `npm run start:dev` / `npm run dev` |
+| Backend | container (compiled, `node dist/main`) | host, watch mode |
+| Frontend | container (static build behind nginx) | host, Vite dev server + HMR |
+| Redis, Meilisearch, observability | containers | containers |
+| PostgreSQL | **remote, never containerised** | **remote, never containerised** |
+| Hot reload | no — code changes need a rebuild | yes |
+| Best for | running the whole system, demos, checking it works from a clean machine | actually developing |
+
+Both modes need `backend/.env` first (see below): `DATABASE_URL` and the
+two JWT secrets are required and have no defaults, so the app fails fast
+without them. PostgreSQL is remote in **both** modes — nothing here ever
+brings up a database container.
+
+### Prerequisites
+
+- Docker (with Compose v2)
+- A reachable PostgreSQL instance and its connection string
+- Node.js 24+ — **hybrid mode only**; full mode needs no local Node
+
+### First-time setup (both modes)
 
 ```bash
-docker compose up -d
+cp backend/.env.example backend/.env    # fill in DATABASE_URL + JWT secrets
+cp frontend/.env.example frontend/.env  # defaults work as-is
 ```
 
-### 2. Backend
+Then apply the schema to your database — with a local toolchain:
 
 ```bash
-cd backend
-cp .env.example .env   # fill in DATABASE_URL (remote Postgres); MEILI_MASTER_KEY
-                        # must match whatever docker-compose used (default:
-                        # changeme_dev_master_key) if you didn't override it
-npm install
-npm run start:dev
+cd backend && npm install && npm run prisma:migrate:deploy
 ```
 
-### 3. Frontend
+…or through Docker, so full mode needs no local Node at all:
 
 ```bash
-cd frontend
-cp .env.example .env
-npm install
-npm run dev
+docker compose --profile migrate run --rm migrate
 ```
+
+Migrations are **never** applied automatically on container start.
+Applying one to a remote database is a deliberate, reviewed action, not a
+side effect of `docker compose up` — see "Database (Prisma)" above. That
+is why `migrate` is a one-off service on its own profile, and why the
+Prisma CLI is pruned out of the image the backend actually serves from:
+a running container cannot migrate anything.
+
+### Mode 1 — Full (everything in Docker)
+
+```bash
+docker compose --profile full up -d
+```
+
+Brings up Redis, Meilisearch, the observability stack, **and** the
+backend and frontend as containers. The `full` profile is what gates the
+two app services: Compose skips a profiled service unless its profile is
+named, which is why the plain `up -d` below still starts infra only.
+
+- Frontend — **http://localhost:5173**
+- Backend — **http://localhost:3000** (`/health`, `/metrics`)
+- Grafana — **http://localhost:3001**
+
+Both images are production-style: the backend is compiled and run as
+`node dist/main`, the frontend is a static Vite build served by nginx.
+Neither mounts your source tree, so **code changes require a rebuild**:
+
+```bash
+docker compose --profile full up -d --build backend   # or: frontend
+```
+
+One consequence worth knowing: Vite inlines `VITE_*` vars at *build*
+time, so `VITE_API_URL` / `VITE_WS_URL` are baked into the frontend image
+and changing them means rebuilding it, not restarting it. They are
+passed as build args (see `docker-compose.yml`) and are public by
+definition — never put a secret in one.
+
+Shut down with `docker compose --profile full down` (add `-v` to also
+drop the Redis/Meilisearch/Grafana volumes).
+
+### Mode 2 — Hybrid (infra in Docker, apps on the host)
+
+The better setup for development: containers for the things you don't
+edit, hot reload for the things you do.
+
+```bash
+docker compose up -d          # Redis, Meilisearch, observability only
+```
+
+Then, in two terminals:
+
+```bash
+cd backend && npm install && npm run start:dev   # http://localhost:3000
+```
+
+```bash
+cd frontend && npm install && npm run dev        # http://localhost:5173
+```
+
+`backend/.env`'s defaults already point `REDIS_URL` and
+`MEILISEARCH_HOST` at the compose services on localhost. Keep
+`MEILI_MASTER_KEY` matching whatever the meilisearch container was
+started with (default `changeme_dev_master_key`) — in full mode compose
+pins the two together for you, but here they are yours to keep in sync.
+
+### Ports
+
+Every port is overridable from a root `.env` file or the shell.
+
+| Service | URL | Override |
+| --- | --- | --- |
+| Frontend | http://localhost:5173 | `FRONTEND_PORT` (full mode) |
+| Backend (REST + WebSocket) | http://localhost:3000 | `BACKEND_PORT` (full), `PORT` (hybrid) |
+| Grafana | http://localhost:3001 | `GRAFANA_PORT` |
+| Prometheus | http://localhost:9090 | `PROMETHEUS_PORT` |
+| Meilisearch | http://localhost:7700 | `MEILISEARCH_PORT` |
+| Redis | localhost:6379 | `REDIS_PORT` |
+| Loki | http://localhost:3100 | `LOKI_PORT` |
+
+Grafana comes up with the "Marketplace Overview" dashboard already
+provisioned — request rates, latency, checkout/bid/queue/outbox metrics,
+and a log panel that traces a single operation by correlation ID. It
+works identically in both modes, because Prometheus always scrapes
+`host.docker.internal:3000` (the backend is on the host's port 3000
+either way) and Promtail always tails `backend/logs/` (which the backend
+container bind-mounts).
 
 ## Available Scripts (per app)
 
@@ -214,7 +342,130 @@ with `FIXED_PRICE`/`AUCTION` product types, server-side ownership
 enforcement, and soft-delete (archive, never physical delete) to avoid
 breaking existing carts/orders.
 
-Genuinely complex business logic (checkout, bid placement, order-status
-aggregation, refund resolution) is intentionally stubbed
-(`NotImplementedException`) pending its own task — see the relevant
-service files for exactly what each stub still needs to do.
+**The async event infrastructure is implemented**: a Transactional
+Outbox (`OutboxEvent`, written in the same transaction as the domain
+change it describes) relayed by a claim-and-publish `OutboxPublisherService`
+onto BullMQ queues (`infrastructure/queue/`), with reusable idempotency
+for both event consumers (`EventIdempotencyService` / `ProcessedEvent`)
+and client-retried commands (`IdempotencyKeyService` / `IdempotencyKey`
+via an `Idempotency-Key` header — wired on checkout and bid placement).
+Meilisearch product search is implemented end-to-end on top of this:
+`Product` create/update/archive → outbox → BullMQ → `SearchSyncConsumer`
+→ Meilisearch, fully decoupled and eventually consistent. Four consumers
+are wired: search sync, order processing (auto-advances a new
+`SellerOrder` to `PROCESSING`), notifications (tells the seller about a
+new order), and auction deadlines (ends auctions / expires unclaimed
+wins, backstopped by a periodic Postgres reconciliation sweep since a
+scheduled job isn't outbox-backed). Analytics has a reserved queue but
+no consumer yet. See the `backend-architecture` skill's "Events &
+Meilisearch" section for the full pipeline and delivery-guarantee notes
+(at-least-once, not exactly-once).
+
+**Catalog search, cart, multi-vendor checkout, SellerOrder lifecycle,
+and auctions are implemented.** Search/browsing (`GET /search`) reads
+Meilisearch — full-text, filters, facets, pagination, sorting; a single
+product's detail (`GET /products/:id`) and checkout always re-read
+PostgreSQL, never Meilisearch. The cart (multi-seller, add/update-
+quantity/remove) validates a product's authoritative state at add-time
+but never trusts it at checkout, which re-validates availability/price/
+stock inside its own transaction and atomically decrements stock,
+splitting a multi-vendor cart into one `SellerOrder` per seller with
+commission/ledger entries — see the `backend-architecture` skill's
+"Checkout" section for the exact transaction steps. `SellerOrder`
+transitions through an explicit state machine (`NEW → PROCESSING →
+SHIPPED → COMPLETED`, or cancellation), with the parent `Order.status`
+derived from the set of its `SellerOrder`s (see "SellerOrder lifecycle &
+Order status aggregation"); cancelling one seller's `SellerOrder`
+restores only that seller's stock and never touches another seller's
+part of the same order. Auction bidding uses optimistic concurrency
+control (`Auction.version`) with a bounded retry loop — proven safe
+under genuine concurrent requests, not just mocked ones, by
+`test/bidding-concurrency.e2e-spec.ts` — and a full deadline lifecycle
+(`SCHEDULED → ACTIVE → ENDED/EXPIRED`, winner checkout window,
+auto-expiry).
+
+**The real-time layer is implemented** (`backend/src/infrastructure/
+realtime/`): a NestJS WebSocket gateway on Socket.IO at the `/realtime`
+namespace, broadcasting three kinds of change — inventory updates
+(`product:{id}`), auction bid/end updates (`auction:{id}`), and
+SellerOrder status updates (`order:{id}` and `seller-order:{id}`).
+It is wired the same way everything else async is: a business
+transaction records an outbox event, and `RealtimeConsumer` broadcasts
+it off the `realtime` BullMQ queue — no business service imports
+Socket.IO, and `RealtimeModule` imports no business module.
+
+**WebSocket is a notification mechanism, not a source of truth.**
+PostgreSQL remains authoritative for every value a broadcast mentions.
+That is enforced by the reconnect design rather than by convention:
+`subscribe` both joins a room and returns a snapshot read from Postgres
+in a single round trip, `resync` returns that snapshot again on demand,
+and every broadcast carries the REST endpoint that is authoritative for
+its room — so a client that missed messages (or doubts what it holds)
+converges by asking, and a missed event can never leave the UI
+permanently stale. Connections may be anonymous for public
+product/auction rooms; order rooms require a verified JWT from the
+handshake plus an ownership check, and an invalid token disconnects the
+socket rather than silently downgrading it. See the
+`backend-architecture` skill's "Real-time layer" section for the room
+scheme, the authorization matrix, and the single-process caveat.
+
+**Observability is implemented**: every log line is newline-delimited
+JSON carrying `timestamp`, `level`, a stable `event` name,
+`correlationId`, and `userId`/`entityId`/error details where they apply.
+A correlation ID is taken from an incoming `X-Correlation-ID` header (or
+generated), echoed back on the response, held in `AsyncLocalStorage`, and
+carried through the OutboxEvent row into the BullMQ job and back out
+inside the worker — so one operation is traceable across
+HTTP → service → outbox → queue → worker → event handler **without any
+hop minting a new id**. Prometheus metrics are exposed at `/metrics`
+(HTTP rate/latency/errors, checkout outcomes and duration, bids and
+optimistic-locking conflicts, queue jobs, outbox relay, inventory
+movement, WebSocket connections and broadcasts). See the
+`observability` skill for the conventions and the reasoning behind the
+two rules that matter most — low-cardinality labels, and recording
+business metrics only after the transaction commits.
+
+**Admin moderation and marketplace analytics are implemented.** Every
+admin-only route lives on a single `AdminController` under `/admin`,
+behind one class-level `@Roles(ADMIN)` — the module holds no business
+logic and no service of its own, so "admin can do X" is never a second
+implementation of X with its own subtly different rules, and the
+complete admin surface can be audited by reading one file. It covers
+seller-application moderation (queue + approve/reject), product
+moderation (takedown/reinstatement with a
+`moderatedBy`/`moderatedAt`/`moderationNote` audit trail, emitting the
+same outbox events that add or remove the Meilisearch document),
+disputes, and platform analytics.
+
+Disputes are their own module: a buyer raises one against a `SellerOrder`
+they actually bought (verified through `OrdersService`, 404 rather than
+403 so the endpoint can't be used to probe ids), only one may be awaiting
+a decision per order at a time, and an admin ruling is final and must
+carry written reasoning.
+
+`GET /admin/analytics` returns the whole dashboard in one response —
+commission revenue, seller revenue, order counts, cart→order conversion,
+top 5 products, top 5 sellers, a daily sales chart (30 days by default),
+and a comparison against the equal-length window immediately before.
+`GET /admin/analytics/export` returns any of those datasets as CSV or
+JSON. A seller reads their own figures at `GET /analytics/me/seller`,
+resolved from their authenticated identity — there is deliberately no
+`sellerId` path parameter to swap.
+
+**No rollup tables, no CQRS.** Every figure is summed live from the
+transactional rows (`LedgerEntry`, `OrderItem`, `Order`), so a reported
+number cannot drift from the data it describes; the ledger already *is*
+the financial read model, and indexes were added for the period queries
+instead. Money is summed in Postgres `numeric` and folded in `Decimal`,
+never a JS float, and returned as fixed-2 strings. The one
+reporting-shaped table is `CartSession`, and only because checkout
+DELETES cart items — measuring conversion from `CartItem` afterwards
+would count only the carts that *didn't* convert. It is still written
+inside the same transaction as the cart mutation and the checkout it
+records, so it is transactional truth rather than an eventually-
+consistent projection.
+
+Refund resolution (`PaymentsLedgerService.resolveRefund`) remains
+intentionally stubbed (`NotImplementedException`) pending its own task.
+Analytics is also the one BullMQ queue with no consumer yet — nothing in
+the reporting path is async.

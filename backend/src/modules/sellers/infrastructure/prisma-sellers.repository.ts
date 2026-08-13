@@ -19,6 +19,13 @@ export class PrismaSellersRepository implements SellersRepository {
     return this.prisma.sellerProfile.findUnique({ where: { userId } });
   }
 
+  findMany(filter: { status?: SellerProfileStatus }): Promise<SellerProfile[]> {
+    return this.prisma.sellerProfile.findMany({
+      where: { status: filter.status },
+      orderBy: { appliedAt: 'asc' },
+    });
+  }
+
   create(data: {
     userId: string;
     businessName: string;

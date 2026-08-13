@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
+import { closeApp } from './support/close-app';
 
 // Guard rejection happens before any DB access, so this doesn't need a
 // real database — see backend/test/jest-e2e-setup.ts.
@@ -55,6 +56,6 @@ describe('Global auth guard (e2e)', () => {
   });
 
   afterEach(async () => {
-    await app.close();
+    await closeApp(app);
   });
 });

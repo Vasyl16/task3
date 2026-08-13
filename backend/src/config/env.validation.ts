@@ -24,6 +24,13 @@ export const envValidationSchema = Joi.object({
   MEILISEARCH_HOST: Joi.string().uri().default('http://localhost:7700'),
   MEILI_MASTER_KEY: Joi.string().min(1).default('changeme_dev_master_key'),
 
+  // Structured logging (see core/logging/app-logger.service.ts).
+  // LOG_FILE is what Promtail tails; allow '' to turn the file sink off.
+  LOG_LEVEL: Joi.string()
+    .valid('error', 'warn', 'info', 'debug', 'verbose')
+    .default('info'),
+  LOG_FILE: Joi.string().allow('').default('logs/app.log'),
+
   // JWT — required, no safe default for a secret.
   JWT_ACCESS_SECRET: Joi.string().min(16).required(),
   JWT_ACCESS_EXPIRES_IN: Joi.string().default('15m'),

@@ -38,6 +38,15 @@ export class SellersService {
     return this.sellersRepository.findByUserId(userId);
   }
 
+  // Admin-only (enforced by @Roles(ADMIN) on AdminController) — the
+  // seller-application moderation queue. Unfiltered it returns every
+  // profile; `status: PENDING` is the queue of things awaiting a human.
+  listApplications(filter: {
+    status?: SellerProfileStatus;
+  }): Promise<SellerProfile[]> {
+    return this.sellersRepository.findMany(filter);
+  }
+
   // The ownership-check primitive other modules (products, orders, ...)
   // use to resolve "does this caller have an approved seller identity,
   // and if so what is it" — never take a sellerId from the client and

@@ -158,6 +158,32 @@ describe('AuthService', () => {
       expect(result.accessToken).toBe('signed.jwt.token');
       expect(refreshTokenRepository.create).toHaveBeenCalledTimes(1);
     });
+
+    // Regression: the refresh payload used to be just { sub }, and JWT's
+    // iat/exp are second-granular — so logging in twice within the same
+    // second signed a byte-identical token whose hash collided with the
+    // tokenHash unique index, surfacing as a 500. A unique jti per issue
+    // is what keeps two same-second logins distinct.
+    it('gives every issued refresh token a unique jti, so same-second logins cannot collide', async () => {
+      const passwordHash = await bcrypt.hash('correct-password', 4);
+      usersService.findByEmail.mockResolvedValue(buildUser({ passwordHash }));
+
+      await authService.login({
+        email: 'alice@example.com',
+        password: 'correct-password',
+      });
+      await authService.login({
+        email: 'alice@example.com',
+        password: 'correct-password',
+      });
+
+      const refreshPayloads = jwtService.sign.mock.calls
+        .map(([payload]) => payload as { sub: string; jti?: string })
+        .filter((payload) => payload.jti !== undefined);
+
+      expect(refreshPayloads).toHaveLength(2);
+      expect(refreshPayloads[0].jti).not.toBe(refreshPayloads[1].jti);
+    });
   });
 
   describe('refresh', () => {
