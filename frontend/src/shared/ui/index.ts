@@ -25,3 +25,4 @@ export { CenteredPage } from './centered-page';
 export { ToastProvider } from './toast';
 export { useToast } from './use-toast';
 export type { ToastInput } from './toast-context';
+export { Pagination } from './pagination';

@@ -11,3 +11,4 @@ export type {
   RequestOptions,
 } from './http-client';
 export { ApiError, isApiError, toUserMessage } from './api-error';
+export type { Paginated } from './paginated';
