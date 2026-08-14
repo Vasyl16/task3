@@ -22,9 +22,13 @@ export class NotificationsService {
     return this.notificationsRepository.findForUser(userId, filter);
   }
 
-  async markRead(id: string): Promise<Notification> {
+  // Someone else's notification is indistinguishable from a missing one:
+  // the response body carries the notification's title/body/data, so
+  // without this check a valid token from any account was enough to read
+  // another user's notification content by id.
+  async markRead(id: string, userId: string): Promise<Notification> {
     const notification = await this.notificationsRepository.findById(id);
-    if (!notification) {
+    if (!notification || notification.userId !== userId) {
       throw new NotFoundException(`Notification ${id} not found`);
     }
     return this.notificationsRepository.markRead(id);

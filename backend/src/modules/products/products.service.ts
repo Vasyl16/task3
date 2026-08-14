@@ -6,11 +6,11 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  Prisma,
   ProductStatus,
   ProductType,
   UserRole,
   type Inventory,
-  type Prisma,
   type Product,
 } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
@@ -38,6 +38,34 @@ import {
   ProductModerationAction,
 } from './dto/moderate-product.dto';
 
+// A Product minus its moderation audit trail — see findAllForCatalog.
+export type CatalogProduct = Omit<
+  Product,
+  'moderatedByUserId' | 'moderatedAt' | 'moderationNote'
+>;
+
+// Built by listing what IS public rather than deleting what isn't. The
+// difference matters: a sensitive column added to Product later is
+// excluded from this response by default and has to be opted in
+// deliberately, whereas a blocklist would start leaking it the moment it
+// was added — which is exactly how the moderation fields got out.
+function toCatalogProduct(product: Product): CatalogProduct {
+  return {
+    id: product.id,
+    sellerId: product.sellerId,
+    categoryId: product.categoryId,
+    name: product.name,
+    slug: product.slug,
+    description: product.description,
+    imageUrl: product.imageUrl,
+    basePrice: product.basePrice,
+    type: product.type,
+    status: product.status,
+    createdAt: product.createdAt,
+    updatedAt: product.updatedAt,
+  };
+}
+
 @Injectable()
 export class ProductsService {
   private readonly logger = new Logger(ProductsService.name);
@@ -54,6 +82,10 @@ export class ProductsService {
     private readonly prisma: PrismaService,
   ) {}
 
+  // Internal lookups — the full row, including the moderation audit
+  // trail. Used by cart/bidding/orders and by the ownership-checked
+  // write paths below; never returned straight to an anonymous client
+  // (see the *ForCatalog variants).
   findAll(filter?: {
     categoryId?: string;
     sellerId?: string;
@@ -67,6 +99,24 @@ export class ProductsService {
       throw new NotFoundException(`Product ${id} not found`);
     }
     return product;
+  }
+
+  // What the @Public() catalog routes return. moderatedByUserId /
+  // moderatedAt / moderationNote are an internal audit trail — an
+  // admin's id and their free-text reason for taking a listing down —
+  // and were being served to unauthenticated callers by GET /products
+  // and GET /products/:id. Stripped here rather than in the controller
+  // for the same reason UsersService.toPublicUser lives in the service:
+  // sanitization belongs with the module that owns the data.
+  async findAllForCatalog(filter?: {
+    categoryId?: string;
+    sellerId?: string;
+  }): Promise<CatalogProduct[]> {
+    return (await this.findAll(filter)).map(toCatalogProduct);
+  }
+
+  async findByIdForCatalog(id: string): Promise<CatalogProduct> {
+    return toCatalogProduct(await this.findById(id));
   }
 
   // Reference implementation of the strong-consistency + outbox pattern:
@@ -85,26 +135,47 @@ export class ProductsService {
 
     const correlationId = this.correlationIdService.getId() ?? randomUUID();
 
-    return this.prisma.$transaction(async (tx) => {
-      const product = await this.productsRepository.createWithInventory(tx, {
-        ...dto,
-        type: dto.type ?? ProductType.FIXED_PRICE,
-        sellerId: sellerProfile.id,
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const product = await this.productsRepository.createWithInventory(tx, {
+          ...dto,
+          type: dto.type ?? ProductType.FIXED_PRICE,
+          sellerId: sellerProfile.id,
+        });
+        await this.outboxService.record(tx, {
+          aggregateType: 'Product',
+          aggregateId: product.id,
+          eventType: PRODUCT_CREATED_EVENT,
+          payload: {
+            productId: product.id,
+            sellerId: product.sellerId,
+            categoryId: product.categoryId,
+            name: product.name,
+          },
+          correlationId,
+        });
+        return product;
       });
-      await this.outboxService.record(tx, {
-        aggregateType: 'Product',
-        aggregateId: product.id,
-        eventType: PRODUCT_CREATED_EVENT,
-        payload: {
-          productId: product.id,
-          sellerId: product.sellerId,
-          categoryId: product.categoryId,
-          name: product.name,
-        },
-        correlationId,
-      });
-      return product;
-    });
+    } catch (err) {
+      // Product.slug is globally unique (it's the public URL), so one
+      // seller's slug can collide with a product they can't even see.
+      // Letting Prisma's P2002 escape would surface as an opaque 500 with
+      // a stack trace naming the repository file; the seller needs to
+      // know WHICH field to change.
+      if (isSlugConflict(err)) {
+        this.logger.warn({
+          event: 'product.slug_conflict',
+          userId: callerId,
+          entityType: 'Product',
+          sellerId: sellerProfile.id,
+          slug: dto.slug,
+        });
+        throw new ConflictException(
+          `The URL slug "${dto.slug}" is already taken — please choose a different one`,
+        );
+      }
+      throw err;
+    }
   }
 
   async update(
@@ -115,9 +186,59 @@ export class ProductsService {
     const product = await this.findById(id); // 404s if missing
     await this.assertOwnsProductOrIsAdmin(product, caller);
 
+    const { quantityAvailable, ...productFields } = dto;
     const correlationId = this.correlationIdService.getId() ?? randomUUID();
     return this.prisma.$transaction(async (tx) => {
-      const updated = await this.productsRepository.update(tx, id, dto);
+      const updated = await this.productsRepository.update(
+        tx,
+        id,
+        productFields,
+      );
+
+      if (quantityAvailable !== undefined) {
+        const inventory = await this.productsRepository.setStock(
+          tx,
+          id,
+          quantityAvailable,
+        );
+        if (!inventory) {
+          throw new ConflictException(
+            `Stock for product ${id} was changed concurrently — please retry`,
+          );
+        }
+        await this.recordInventoryUpdated(tx, inventory, 'SELLER_ADJUSTMENT');
+      }
+
+      await this.outboxService.record(tx, {
+        aggregateType: 'Product',
+        aggregateId: updated.id,
+        eventType: PRODUCT_UPDATED_EVENT,
+        payload: { productId: updated.id },
+        correlationId,
+      });
+      return updated;
+    });
+  }
+
+  // The file itself is already written to disk by the time this runs
+  // (Multer's disk storage engine — see products.controller.ts) — this
+  // only persists the resulting PUBLIC path. Same ownership check and
+  // outbox pattern as update(), kept as a separate method because it's a
+  // separate route (multipart, not the JSON UpdateProductDto) rather
+  // than a field folded into it.
+  async updateImage(
+    id: string,
+    caller: AuthenticatedUser,
+    imageUrl: string,
+  ): Promise<Product> {
+    const product = await this.findById(id); // 404s if missing
+    await this.assertOwnsProductOrIsAdmin(product, caller);
+
+    const correlationId = this.correlationIdService.getId() ?? randomUUID();
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await this.productsRepository.update(tx, id, {
+        imageUrl,
+      });
       await this.outboxService.record(tx, {
         aggregateType: 'Product',
         aggregateId: updated.id,
@@ -273,6 +394,42 @@ export class ProductsService {
     await this.recordInventoryUpdated(tx, inventory, 'CANCELLATION');
   }
 
+  // ===================== Auction lot holds =====================
+  // Called by BiddingService/OrdersService from inside their own
+  // transactions, same contract as the checkout helpers above. A hold
+  // does NOT consume stock — see ProductsRepository.reserveStock.
+
+  async reserveStockForAuction(
+    tx: Prisma.TransactionClient,
+    productId: string,
+    quantity: number,
+  ): Promise<void> {
+    const inventory = await this.productsRepository.reserveStock(
+      tx,
+      productId,
+      quantity,
+    );
+    if (!inventory) {
+      throw new ConflictException(
+        `Not enough free stock for product ${productId} to hold ${quantity} unit(s) for an auction`,
+      );
+    }
+    await this.recordInventoryUpdated(tx, inventory, 'AUCTION_HOLD');
+  }
+
+  async releaseAuctionReservation(
+    tx: Prisma.TransactionClient,
+    productId: string,
+    quantity: number,
+  ): Promise<void> {
+    const inventory = await this.productsRepository.releaseReservation(
+      tx,
+      productId,
+      quantity,
+    );
+    await this.recordInventoryUpdated(tx, inventory, 'AUCTION_RELEASE');
+  }
+
   // Inventory is the one piece of state that changes without its owner
   // (this module) being the one that triggered it — checkout and
   // cancellation both live in OrdersService. Recording the event HERE,
@@ -316,4 +473,29 @@ export class ProductsService {
       throw new ForbiddenException('You do not own this product');
     }
   }
+}
+
+const UNIQUE_CONSTRAINT_VIOLATION = 'P2002';
+
+// meta.target's shape is not stable across Prisma versions/adapters —
+// it arrives as a string[] of field names on some, a single constraint
+// name ("Product_slug_key") on others, and is absent entirely under the
+// pg driver adapter this project uses, where only the message names the
+// field. Checking all three keeps this from silently regressing to a
+// 500 on a Prisma upgrade.
+function isSlugConflict(err: unknown): boolean {
+  if (
+    !(err instanceof Prisma.PrismaClientKnownRequestError) ||
+    err.code !== UNIQUE_CONSTRAINT_VIOLATION
+  ) {
+    return false;
+  }
+  const target = err.meta?.target;
+  if (Array.isArray(target)) {
+    return target.includes('slug');
+  }
+  if (typeof target === 'string') {
+    return target.includes('slug');
+  }
+  return err.message.includes('slug');
 }
