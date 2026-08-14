@@ -309,6 +309,158 @@ Run these from inside `backend/` or `frontend/` respectively:
 | `npm run test`     | Unit tests (Jest for backend, Vitest for frontend) |
 | `npm run test:e2e` | Backend end-to-end tests (NestJS + supertest) |
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and every pull
+request, as four parallel jobs:
+
+| Job | What it does |
+| --- | --- |
+| **backend** | lint (`--max-warnings=0`), typecheck, unit tests, build |
+| **backend-e2e** | the same, against **ephemeral** PostgreSQL + Redis + Meilisearch service containers |
+| **frontend** | lint, typecheck, Vitest, build |
+| **config-lint** | hadolint on both Dockerfiles, `docker compose config` for both profiles, actionlint on the workflows |
+
+**CI never touches the development database.** PostgreSQL is remote in
+development, but a pull-request run must not be allowed near a personal
+or shared instance — these tests write and delete real rows. The e2e job
+brings up a throwaway `postgres:16-alpine` container that exists only for
+the length of that job, and **no `DATABASE_URL` secret is referenced
+anywhere in the workflow**, so there is nothing to leak and nothing to
+accidentally point at the wrong instance. JWT secrets in CI are literal
+throwaway strings for a throwaway database. `RESEND_API_KEY` is left
+unset on purpose, so `EmailService` logs and skips instead of emailing a
+real address.
+
+**Known gap:** the e2e job builds its schema with `prisma db push`, not
+`prisma migrate deploy`, because the squashed init migration is missing
+its `CREATE TYPE` statements and cannot replay against an empty database.
+The live database is unaffected (the types exist there). The consequence
+is that CI does **not** prove the migrations can rebuild the schema from
+scratch — restoring that coverage means repairing the init migration
+first, which rewrites already-applied history and so is a deliberate
+decision rather than something to do silently.
+
+## API documentation
+
+With the backend running, interactive OpenAPI docs are at
+**<http://localhost:3000/docs>** (raw spec at `/docs-json`).
+
+Driving the API by hand from there:
+
+1. `POST /auth/login` with a seeded account — they all use the password
+   `SeedPass123!` (see `backend/prisma/seed.ts`, which prints the list).
+2. Click **Authorize**, paste the `accessToken` (no `Bearer ` prefix). It
+   persists across page reloads.
+3. Endpoints are grouped by tag; each documents its role requirement and
+   the error responses that carry business meaning — why a checkout 400s
+   versus 409s, why a bid 400 under contention is the optimistic lock
+   working rather than a failure, and why probing someone else's record
+   returns 404 rather than 403.
+
+Request schemas are generated from the DTOs themselves via the
+`@nestjs/swagger` CLI plugin (wired in `nest-cli.json`), so the documented
+constraints — required fields, UUID formats, minimums — are the ones
+`class-validator` actually enforces at runtime and cannot drift from them.
+
+## Load testing
+
+One scenario, in `load/bidding.k6.js`: **many concurrent bidders on a
+single auction**. It was chosen over concurrent checkout because it puts
+every virtual user in contention for the *same database row*. Checkout
+under limited inventory contends too, but it spreads across several
+products and sellers; here the contention is total, which is what
+actually exercises the optimistic-locking strategy in
+`BiddingService.placeBid`.
+
+The script measures throughput and latency, and — in `teardown()`, against
+the live API after the load stops — asserts the **business invariants**.
+That second half matters: a system that silently dropped bids would look
+*faster* here, not slower.
+
+### Running it
+
+Needs [k6](https://k6.io/) and the app running.
+
+```bash
+# Rate limiting is raised for the run — we're measuring the concurrency
+# strategy, not the throttle (see THROTTLE_LIMIT in backend/.env.example).
+cd backend
+THROTTLE_LIMIT=1000000 THROTTLE_AUTH_LIMIT=1000000 npm run start:dev
+
+# In another shell, from the repo root:
+VUS=10 DURATION=30s k6 run load/bidding.k6.js
+
+node load/cleanup.mjs   # removes the bidder accounts / product / auction it created
+```
+
+### Results
+
+Measured on 2026-08-14, macOS arm64, single backend process, against the
+project's **remote** PostgreSQL. Real numbers from the runs below — not
+projections.
+
+| Run | VUs | `DATABASE_POOL_MAX` | RPS | p95 latency | Bids accepted | Unexpected 5xx | Invariants |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| A | 10 | 10 | 3.07/s | 4.42 s | 26 | **0** | ✅ all held |
+| B | 50 | 10 | 4.39/s | 8.74 s | 17 | 18 | ✅ all held |
+| C | 50 | 50 | 4.34/s | 10.91 s | 9 | 207 | ✅ all held |
+
+Invariants asserted after every run, all of which held in all three:
+
+- `auction.version` equals the number of accepted `Bid` rows — no update
+  was lost, and none applied twice.
+- `currentHighestBid` equals the highest accepted bid.
+- `currentHighestBidderId` is the account that actually placed it.
+- Accepted bids, in chronological order, are **strictly ascending** — no
+  accepted bid is ever lower than one accepted before it. That is the
+  definition of "no lost update" for this domain.
+
+### What this demonstrates about the concurrency strategy
+
+**The optimistic locking is correct, and that is the headline.** Across
+all three runs — including the two that were failing badly — the auction
+never lost a bid, never double-counted one, and always settled on the
+genuine highest. Under contention the conditional
+`UPDATE ... WHERE version = ?` either applies or matches zero rows;
+Postgres serializes the two writers, so the loser re-reads and retries
+rather than overwriting the winner. Contention shows up as **rejections,
+never as corruption**: in run A, 26 bids were accepted and 70 were
+rejected with `400` because the floor had already moved above them. A
+`400` there is the system working.
+
+**The cost is the transaction envelope, not the locking.** A single DB
+round trip to the remote database measures **~122 ms** (`GET /health`,
+which is one `SELECT 1`), against ~1 ms for a route that touches no
+database. One bid costs roughly six round trips — read the auction,
+resolve the bidder's seller profile, begin, conditional update, insert
+the bid, record the outbox event, commit — and the retry loop multiplies
+that by up to `MAX_BID_ATTEMPTS`. That arithmetic, not lock contention,
+is what produces a ~1.3 s successful bid and a p95 of 4.42 s. Against a
+co-located database the same code would be roughly an order of magnitude
+faster; **these numbers characterise a remote-database deployment, and
+should not be read as the algorithm's cost.**
+
+**Concurrency is capped by the connection pool, and enlarging it makes
+things worse.** Every interactive `$transaction` holds a connection for
+its whole duration, so the pool — not CPU — is the ceiling on concurrent
+writes. Run B exceeded it and failed with *"Unable to start a transaction
+in the given time"*. The intuitive fix was run C, which was **worse**:
+with 50 connections, 50 transactions all start, all queue on the same hot
+row, and exceed Prisma's 5 s interactive-transaction timeout mid-flight
+(*"a query cannot be executed on an expired transaction"*). For a single
+contended row, a bigger pool converts fast rejections into slow timeouts.
+The real fixes would be to shrink the transaction (move the outbox write
+and the bid insert into one statement round trip) or to shed load ahead
+of the pool — not to add connections. `DATABASE_POOL_MAX` is now
+configurable (default 10, node-postgres' own default) so this ceiling is
+explicit rather than invisible.
+
+**Known limitation:** the failures in runs B and C surface as `500`s. They
+are honest failures — no data was corrupted — but pool exhaustion and
+transaction timeout are both *capacity* conditions and would be better
+returned as `503` with a `Retry-After`. That is not fixed here.
+
 ## Architecture Notes
 
 See `CLAUDE.md` for the pointer to `.claude/rules/` (always-on / path-
@@ -464,6 +616,37 @@ would count only the carts that *didn't* convert. It is still written
 inside the same transaction as the cart mutation and the checkout it
 records, so it is transactional truth rather than an eventually-
 consistent projection.
+
+**The frontend is fully implemented** (`frontend/`): app bootstrap and
+providers, React Router with role-aware route guards, TanStack Query for
+server state, the shared HTTP client, session handling, a UI kit with
+loading/error/empty states, and every screen — auth, the customer
+catalog/search/cart/checkout/order flow, a realtime layer over the
+backend's Socket.IO gateway (live stock, bids, order status; resyncs
+from scratch on reconnect rather than trusting anything that arrived
+before the drop), a seller dashboard, and an admin dashboard with
+analytics + CSV/JSON export. See `frontend/README.md` for the full
+breakdown.
+
+Building the seller dashboard surfaced one real backend gap: there was
+no way for a seller to list their own `SellerOrder`s (`GET /orders/:id`
+is buyer/admin-only, by design). Added `GET /orders/seller-orders`
+(`OrdersController`, `SELLER`-only), which resolves `sellerId` from the
+caller's own approved profile exactly like product/auction creation
+does — never a request param — so it closes the gap without opening a
+new one.
+
+Two decisions there are worth repeating outside the frontend docs. The
+HTTP client **coalesces concurrent 401s into a single token refresh**:
+the backend rotates refresh tokens and treats reuse of a spent one as
+theft, so several queries refreshing in parallel would revoke the token
+family and log the user out — the one case where a naive client breaks a
+correct backend. And `shared/` may not import auth, since it sits below
+`features/` in the layer order; the client therefore exposes
+`configureHttpClient(...)` and the auth feature injects its
+implementation at bootstrap, with the tokens themselves in
+`shared/lib/token-storage` because they are two strings that know nothing
+about sessions.
 
 Refund resolution (`PaymentsLedgerService.resolveRefund`) remains
 intentionally stubbed (`NotImplementedException`) pending its own task.
