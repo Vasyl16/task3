@@ -1,36 +1,3 @@
--- CreateSchema
-CREATE SCHEMA IF NOT EXISTS "public";
-
--- CreateEnum
-CREATE TYPE "UserRole" AS ENUM ('BUYER', 'ADMIN');
-
--- CreateEnum
-CREATE TYPE "SellerProfileStatus" AS ENUM ('PENDING', 'APPROVED', 'REJECTED', 'SUSPENDED');
-
--- CreateEnum
-CREATE TYPE "ProductStatus" AS ENUM ('DRAFT', 'ACTIVE', 'ARCHIVED');
-
--- CreateEnum
-CREATE TYPE "AuctionStatus" AS ENUM ('SCHEDULED', 'ACTIVE', 'ENDED', 'CANCELLED');
-
--- CreateEnum
-CREATE TYPE "OrderStatus" AS ENUM ('PENDING', 'PARTIALLY_FULFILLED', 'FULFILLED', 'PARTIALLY_CANCELLED', 'CANCELLED');
-
--- CreateEnum
-CREATE TYPE "SellerOrderStatus" AS ENUM ('PENDING', 'CONFIRMED', 'SHIPPED', 'DELIVERED', 'CANCELLED', 'REFUNDED');
-
--- CreateEnum
-CREATE TYPE "LedgerEntryType" AS ENUM ('SALE', 'COMMISSION', 'REFUND', 'PAYOUT', 'ADJUSTMENT');
-
--- CreateEnum
-CREATE TYPE "RefundStatus" AS ENUM ('REQUESTED', 'APPROVED', 'REJECTED', 'PROCESSED');
-
--- CreateEnum
-CREATE TYPE "OutboxEventStatus" AS ENUM ('PENDING', 'PROCESSING', 'PUBLISHED', 'FAILED');
-
--- CreateEnum
-CREATE TYPE "DisputeStatus" AS ENUM ('OPEN', 'UNDER_REVIEW', 'RESOLVED', 'REJECTED');
-
 -- CreateTable
 CREATE TABLE "User" (
     "id" TEXT NOT NULL,
@@ -38,11 +5,23 @@ CREATE TABLE "User" (
     "passwordHash" TEXT,
     "name" TEXT NOT NULL,
     "avatarUrl" TEXT,
-    "role" "UserRole" NOT NULL DEFAULT 'BUYER',
+    "role" "UserRole" NOT NULL DEFAULT 'CUSTOMER',
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "User_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "RefreshToken" (
+    "id" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "tokenHash" TEXT NOT NULL,
+    "expiresAt" TIMESTAMP(3) NOT NULL,
+    "revokedAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "RefreshToken_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -81,10 +60,15 @@ CREATE TABLE "Product" (
     "name" TEXT NOT NULL,
     "slug" TEXT NOT NULL,
     "description" TEXT,
+    "imageUrl" TEXT,
     "basePrice" DECIMAL(12,2) NOT NULL,
+    "type" "ProductType" NOT NULL DEFAULT 'FIXED_PRICE',
     "status" "ProductStatus" NOT NULL DEFAULT 'DRAFT',
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "moderatedByUserId" TEXT,
+    "moderatedAt" TIMESTAMP(3),
+    "moderationNote" TEXT,
 
     CONSTRAINT "Product_pkey" PRIMARY KEY ("id")
 );
@@ -107,12 +91,15 @@ CREATE TABLE "Auction" (
     "productId" TEXT NOT NULL,
     "sellerId" TEXT NOT NULL,
     "startingPrice" DECIMAL(12,2) NOT NULL,
+    "minBidIncrement" DECIMAL(12,2) NOT NULL,
+    "quantity" INTEGER NOT NULL DEFAULT 1,
     "currentHighestBid" DECIMAL(12,2),
     "currentHighestBidderId" TEXT,
     "status" "AuctionStatus" NOT NULL DEFAULT 'SCHEDULED',
     "version" INTEGER NOT NULL DEFAULT 0,
     "startsAt" TIMESTAMP(3) NOT NULL,
     "endsAt" TIMESTAMP(3) NOT NULL,
+    "checkoutDeadline" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -141,6 +128,18 @@ CREATE TABLE "Cart" (
 );
 
 -- CreateTable
+CREATE TABLE "CartSession" (
+    "id" TEXT NOT NULL,
+    "cartId" TEXT NOT NULL,
+    "buyerId" TEXT NOT NULL,
+    "startedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "orderId" TEXT,
+    "convertedAt" TIMESTAMP(3),
+
+    CONSTRAINT "CartSession_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
 CREATE TABLE "CartItem" (
     "id" TEXT NOT NULL,
     "cartId" TEXT NOT NULL,
@@ -155,7 +154,7 @@ CREATE TABLE "CartItem" (
 CREATE TABLE "Order" (
     "id" TEXT NOT NULL,
     "buyerId" TEXT NOT NULL,
-    "status" "OrderStatus" NOT NULL DEFAULT 'PENDING',
+    "status" "OrderStatus" NOT NULL DEFAULT 'NEW',
     "totalAmount" DECIMAL(12,2) NOT NULL,
     "placedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -169,7 +168,7 @@ CREATE TABLE "SellerOrder" (
     "id" TEXT NOT NULL,
     "orderId" TEXT NOT NULL,
     "sellerId" TEXT NOT NULL,
-    "status" "SellerOrderStatus" NOT NULL DEFAULT 'PENDING',
+    "status" "SellerOrderStatus" NOT NULL DEFAULT 'NEW',
     "subtotal" DECIMAL(12,2) NOT NULL,
     "shippingFee" DECIMAL(12,2) NOT NULL DEFAULT 0,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -227,7 +226,10 @@ CREATE TABLE "OutboxEvent" (
     "correlationId" TEXT NOT NULL,
     "status" "OutboxEventStatus" NOT NULL DEFAULT 'PENDING',
     "attempts" INTEGER NOT NULL DEFAULT 0,
+    "lastError" TEXT,
+    "availableAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
     "processedAt" TIMESTAMP(3),
 
     CONSTRAINT "OutboxEvent_pkey" PRIMARY KEY ("id")
@@ -241,6 +243,21 @@ CREATE TABLE "ProcessedEvent" (
     "processedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "ProcessedEvent_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "IdempotencyKey" (
+    "id" TEXT NOT NULL,
+    "key" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "requestHash" TEXT NOT NULL,
+    "status" "IdempotencyKeyStatus" NOT NULL DEFAULT 'PROCESSING',
+    "responseStatus" INTEGER,
+    "responseBody" JSONB,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "completedAt" TIMESTAMP(3),
+
+    CONSTRAINT "IdempotencyKey_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -292,6 +309,12 @@ CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
 CREATE INDEX "User_role_idx" ON "User"("role");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "RefreshToken_tokenHash_key" ON "RefreshToken"("tokenHash");
+
+-- CreateIndex
+CREATE INDEX "RefreshToken_userId_idx" ON "RefreshToken"("userId");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "SellerProfile_userId_key" ON "SellerProfile"("userId");
 
 -- CreateIndex
@@ -340,6 +363,12 @@ CREATE INDEX "Bid_bidderId_idx" ON "Bid"("bidderId");
 CREATE UNIQUE INDEX "Cart_buyerId_key" ON "Cart"("buyerId");
 
 -- CreateIndex
+CREATE INDEX "CartSession_cartId_convertedAt_idx" ON "CartSession"("cartId", "convertedAt");
+
+-- CreateIndex
+CREATE INDEX "CartSession_startedAt_idx" ON "CartSession"("startedAt");
+
+-- CreateIndex
 CREATE INDEX "CartItem_cartId_idx" ON "CartItem"("cartId");
 
 -- CreateIndex
@@ -352,6 +381,9 @@ CREATE INDEX "Order_buyerId_idx" ON "Order"("buyerId");
 CREATE INDEX "Order_status_idx" ON "Order"("status");
 
 -- CreateIndex
+CREATE INDEX "Order_placedAt_idx" ON "Order"("placedAt");
+
+-- CreateIndex
 CREATE INDEX "SellerOrder_orderId_idx" ON "SellerOrder"("orderId");
 
 -- CreateIndex
@@ -359,6 +391,9 @@ CREATE INDEX "SellerOrder_sellerId_idx" ON "SellerOrder"("sellerId");
 
 -- CreateIndex
 CREATE INDEX "SellerOrder_status_idx" ON "SellerOrder"("status");
+
+-- CreateIndex
+CREATE INDEX "SellerOrder_createdAt_idx" ON "SellerOrder"("createdAt");
 
 -- CreateIndex
 CREATE INDEX "OrderItem_sellerOrderId_idx" ON "OrderItem"("sellerOrderId");
@@ -376,13 +411,19 @@ CREATE INDEX "LedgerEntry_sellerOrderId_idx" ON "LedgerEntry"("sellerOrderId");
 CREATE INDEX "LedgerEntry_type_idx" ON "LedgerEntry"("type");
 
 -- CreateIndex
+CREATE INDEX "LedgerEntry_type_createdAt_idx" ON "LedgerEntry"("type", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "LedgerEntry_sellerId_createdAt_idx" ON "LedgerEntry"("sellerId", "createdAt");
+
+-- CreateIndex
 CREATE INDEX "Refund_sellerOrderId_idx" ON "Refund"("sellerOrderId");
 
 -- CreateIndex
 CREATE INDEX "Refund_status_idx" ON "Refund"("status");
 
 -- CreateIndex
-CREATE INDEX "OutboxEvent_status_createdAt_idx" ON "OutboxEvent"("status", "createdAt");
+CREATE INDEX "OutboxEvent_status_availableAt_idx" ON "OutboxEvent"("status", "availableAt");
 
 -- CreateIndex
 CREATE INDEX "OutboxEvent_correlationId_idx" ON "OutboxEvent"("correlationId");
@@ -392,6 +433,9 @@ CREATE INDEX "OutboxEvent_aggregateType_aggregateId_idx" ON "OutboxEvent"("aggre
 
 -- CreateIndex
 CREATE UNIQUE INDEX "ProcessedEvent_eventId_consumerName_key" ON "ProcessedEvent"("eventId", "consumerName");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "IdempotencyKey_key_userId_key" ON "IdempotencyKey"("key", "userId");
 
 -- CreateIndex
 CREATE INDEX "Notification_userId_readAt_idx" ON "Notification"("userId", "readAt");
@@ -415,6 +459,9 @@ CREATE INDEX "Dispute_sellerOrderId_idx" ON "Dispute"("sellerOrderId");
 CREATE INDEX "Dispute_status_idx" ON "Dispute"("status");
 
 -- AddForeignKey
+ALTER TABLE "RefreshToken" ADD CONSTRAINT "RefreshToken_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "SellerProfile" ADD CONSTRAINT "SellerProfile_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
@@ -428,6 +475,9 @@ ALTER TABLE "Product" ADD CONSTRAINT "Product_sellerId_fkey" FOREIGN KEY ("selle
 
 -- AddForeignKey
 ALTER TABLE "Product" ADD CONSTRAINT "Product_categoryId_fkey" FOREIGN KEY ("categoryId") REFERENCES "Category"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Product" ADD CONSTRAINT "Product_moderatedByUserId_fkey" FOREIGN KEY ("moderatedByUserId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "Inventory" ADD CONSTRAINT "Inventory_productId_fkey" FOREIGN KEY ("productId") REFERENCES "Product"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -449,6 +499,9 @@ ALTER TABLE "Bid" ADD CONSTRAINT "Bid_bidderId_fkey" FOREIGN KEY ("bidderId") RE
 
 -- AddForeignKey
 ALTER TABLE "Cart" ADD CONSTRAINT "Cart_buyerId_fkey" FOREIGN KEY ("buyerId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "CartSession" ADD CONSTRAINT "CartSession_cartId_fkey" FOREIGN KEY ("cartId") REFERENCES "Cart"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "CartItem" ADD CONSTRAINT "CartItem_cartId_fkey" FOREIGN KEY ("cartId") REFERENCES "Cart"("id") ON DELETE CASCADE ON UPDATE CASCADE;

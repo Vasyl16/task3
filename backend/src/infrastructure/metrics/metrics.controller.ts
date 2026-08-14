@@ -2,6 +2,7 @@ import { Controller, Get, Header, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { Public } from '../../core/auth/decorators/public.decorator';
 import { MetricsService } from './metrics.service';
+import { ApiTags } from '@nestjs/swagger';
 
 // @Public() because Prometheus scrapes this unauthenticated — it has no
 // JWT to present. That is the standard arrangement, and safe only
@@ -10,6 +11,7 @@ import { MetricsService } from './metrics.service';
 // MetricsService — every label is a bounded, non-identifying dimension).
 // In a real deployment this port would additionally not be exposed
 // publicly; treat that as an infrastructure concern, not an app one.
+@ApiTags('health')
 @Controller('metrics')
 export class MetricsController {
   constructor(private readonly metrics: MetricsService) {}

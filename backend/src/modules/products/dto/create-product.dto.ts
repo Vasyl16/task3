@@ -4,6 +4,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  IsUrl,
   IsUUID,
   Min,
   MinLength,
@@ -28,6 +29,16 @@ export class CreateProductDto {
   @IsOptional()
   @IsString()
   description?: string;
+
+  // Alternative to the separate POST /products/:id/image upload route —
+  // a seller can point at an image they already host elsewhere instead
+  // of uploading a file. Whichever the client used, this is the only
+  // field that ever reaches Product.imageUrl at creation time; the
+  // upload route (see products.controller.ts) is the only other writer,
+  // and either one simply overwrites whatever was there before.
+  @IsOptional()
+  @IsUrl()
+  imageUrl?: string;
 
   // > 0, not >= 0 — a marketplace listing at $0 isn't meaningful for a
   // fixed-price product (an AUCTION's startingPrice may legitimately be 0).

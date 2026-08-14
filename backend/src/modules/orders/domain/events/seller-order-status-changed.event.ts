@@ -14,6 +14,11 @@ export const SELLER_ORDER_STATUS_CHANGED_EVENT = 'SellerOrderStatusChanged';
 export interface SellerOrderStatusChangedEvent {
   sellerOrderId: string;
   orderId: string;
+  // Included directly (like AuctionEndedEvent.winningBidderId) so
+  // standalone consumers — EmailConsumer, NotificationsConsumer,
+  // RealtimeConsumer's notification-room ping — never need to resolve
+  // Order -> buyer themselves.
+  buyerId: string;
   status: SellerOrderStatus;
   orderStatus: OrderStatus;
 }

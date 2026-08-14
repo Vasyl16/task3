@@ -12,6 +12,13 @@ export enum QueueName {
   NOTIFICATIONS = 'notifications',
   ANALYTICS = 'analytics',
   AUCTION_DEADLINES = 'auction-deadlines',
+  EMAIL = 'email',
+  // The refund saga's lane (see RefundConsumer). Its own queue because
+  // it's the one consumer that talks to an external payment provider:
+  // it retries on a much slower cadence than an in-process handler and
+  // must never hold up an order's status broadcast behind a gateway
+  // outage.
+  PAYMENTS = 'payments',
   // WebSocket fan-out. Deliberately its own lane: a broadcast is only
   // useful while it's fresh, so it must never queue behind a slow
   // search-sync or notification backlog.

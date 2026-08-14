@@ -21,6 +21,8 @@ export class QueueService {
     @InjectQueue(QueueName.ANALYTICS) analytics: Queue,
     @InjectQueue(QueueName.AUCTION_DEADLINES) auctionDeadlines: Queue,
     @InjectQueue(QueueName.REALTIME) realtime: Queue,
+    @InjectQueue(QueueName.EMAIL) email: Queue,
+    @InjectQueue(QueueName.PAYMENTS) payments: Queue,
   ) {
     this.queues = {
       [QueueName.SEARCH_SYNC]: searchSync,
@@ -29,6 +31,8 @@ export class QueueService {
       [QueueName.ANALYTICS]: analytics,
       [QueueName.AUCTION_DEADLINES]: auctionDeadlines,
       [QueueName.REALTIME]: realtime,
+      [QueueName.EMAIL]: email,
+      [QueueName.PAYMENTS]: payments,
     };
   }
 

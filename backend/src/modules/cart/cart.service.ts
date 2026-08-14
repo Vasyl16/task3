@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -11,6 +12,7 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service';
 import { ProductsService } from '../products/products.service';
+import { SellersService } from '../sellers/sellers.service';
 import { CartRepository, CartWithItems } from './domain/cart.repository';
 import { AddCartItemDto } from './dto/add-cart-item.dto';
 import { UpdateCartItemDto } from './dto/update-cart-item.dto';
@@ -20,6 +22,7 @@ export class CartService {
   constructor(
     private readonly cartRepository: CartRepository,
     private readonly productsService: ProductsService,
+    private readonly sellersService: SellersService,
     // Used only to open the transaction boundary in addItem — the item
     // write and its funnel record must commit together.
     private readonly prisma: PrismaService,
@@ -41,6 +44,17 @@ export class CartService {
   async addItem(buyerId: string, dto: AddCartItemDto) {
     const product = await this.productsService.findById(dto.productId); // 404s if missing
     this.assertPurchasableViaCart(product);
+    // A buyer with no seller profile at all is the common case and must
+    // not throw here — findByUserId (not
+    // getOwnApprovedSellerProfileOrThrow) returns null for that, which
+    // simply never matches. Mirrors BiddingService.placeBid's identical
+    // self-listing check.
+    const callerSellerProfile = await this.sellersService.findByUserId(buyerId);
+    if (callerSellerProfile?.id === product.sellerId) {
+      throw new ForbiddenException(
+        'You cannot add your own product to your cart',
+      );
+    }
     const cart = await this.getOrCreateCartId(buyerId);
     // NOTE: no STOCK validation here by design — quantity sufficiency is
     // only authoritative at checkout time, inside its own transaction

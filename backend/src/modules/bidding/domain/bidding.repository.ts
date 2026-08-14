@@ -3,6 +3,7 @@ import type { Auction, AuctionStatus, Bid, Prisma } from '@prisma/client';
 export interface CreateAuctionInput {
   productId: string;
   sellerId: string;
+  quantity: number;
   startingPrice: number;
   minBidIncrement: number;
   startsAt: Date;
@@ -19,7 +20,18 @@ export abstract class BiddingRepository {
     productId?: string;
     sellerId?: string;
   }): Promise<Auction[]>;
-  abstract createAuction(data: CreateAuctionInput): Promise<Auction>;
+  // Every auction the given user has placed at least one bid on —
+  // "won or lost", not just currently-winning, so a buyer's history page
+  // doesn't lose an auction the moment someone outbids them.
+  abstract findAuctionsForBidder(bidderId: string): Promise<Auction[]>;
+  // Takes tx (unlike findAuctions/findAuctionById) — BiddingService
+  // writes the auction and its "product became biddable" outbox event
+  // in the same transaction, so search-sync can never observe one
+  // without the other.
+  abstract createAuction(
+    tx: Prisma.TransactionClient,
+    data: CreateAuctionInput,
+  ): Promise<Auction>;
   abstract listBidsForAuction(auctionId: string): Promise<Bid[]>;
 
   // THE concurrency-critical write. Optimistic locking: succeeds only if

@@ -56,9 +56,16 @@ export class RealtimeRoomsService {
     if (user.role === UserRole.ADMIN) {
       return ALLOWED;
     }
-    return room.type === RealtimeRoomType.ORDER
-      ? this.authorizeOrderRoom(room.id, user)
-      : this.authorizeSellerOrderRoom(room.id, user);
+    switch (room.type) {
+      case RealtimeRoomType.ORDER:
+        return this.authorizeOrderRoom(room.id, user);
+      case RealtimeRoomType.SELLER_ORDER:
+        return this.authorizeSellerOrderRoom(room.id, user);
+      case RealtimeRoomType.NOTIFICATION:
+        return this.authorizeNotificationRoom(room.id, user);
+      default:
+        return ALLOWED; // unreachable — the two public types return above
+    }
   }
 
   // Mirrors OrdersService.findById's rule deliberately, including the
@@ -110,6 +117,23 @@ export class RealtimeRoomsService {
     return ALLOWED;
   }
 
+  // The room id IS the userId (see notificationRoom) — no DB lookup
+  // needed, just an identity check: nobody may subscribe to another
+  // user's notification room.
+  private authorizeNotificationRoom(
+    userId: string,
+    user: AuthenticatedUser,
+  ): Promise<AuthorizationResult> {
+    if (userId !== user.id) {
+      return Promise.resolve({
+        allowed: false,
+        error: RealtimeAckError.NOT_FOUND,
+        message: `Notification room ${userId} not found`,
+      });
+    }
+    return Promise.resolve(ALLOWED);
+  }
+
   // Returns null when the underlying row is gone — the gateway turns
   // that into a NOT_FOUND ack rather than joining a room that can never
   // produce anything.
@@ -142,6 +166,8 @@ export class RealtimeRoomsService {
         return this.readOrderState(room.id);
       case RealtimeRoomType.SELLER_ORDER:
         return this.readSellerOrderState(room.id);
+      case RealtimeRoomType.NOTIFICATION:
+        return this.readNotificationState(room.id);
     }
   }
 
@@ -250,5 +276,17 @@ export class RealtimeRoomsService {
         updatedAt: sellerOrder.updatedAt.toISOString(),
       },
     };
+  }
+
+  // Never null — unlike the other rooms, there's no single row a
+  // notification room is "about"; every authenticated user has one,
+  // even with zero notifications so far. The full list stays a REST
+  // concern (GET /notifications) — this only carries the header-badge
+  // count, cheap enough to compute on every subscribe/resync.
+  private async readNotificationState(userId: string) {
+    const unreadCount = await this.prisma.notification.count({
+      where: { userId, readAt: null },
+    });
+    return { value: { userId, unreadCount } };
   }
 }

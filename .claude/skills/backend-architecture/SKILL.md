@@ -269,10 +269,9 @@ business transaction (Product write + OutboxService.record(tx, event))
   genuinely new processing lane. An event type with NO mapping yet is
   left `PENDING` (not `FAILED`) by the publisher and rechecked
   infrequently — "no consumer implemented yet" is expected, ongoing
-  project scope (several event types — `OrderPlaced`,
-  `SellerOrderStatusChanged`, `BidPlaced`, `AuctionEnded` — are
-  recorded today with no consumer yet, by design — `OrderPlaced` is now
-  the only one), not a bug. A value in
+  project scope (several event types — `SellerOrderStatusChanged`,
+  `BidPlaced`, `AuctionEnded` — are recorded today with no consumer yet,
+  by design). A value in
   the map can be a single `QueueName` or an array, for one fact that
   should fan out to more than one independent reaction (see
   `SellerOrderCreated`, which drives both order-processing and
@@ -286,7 +285,13 @@ business transaction (Product write + OutboxService.record(tx, event))
   BullMQ → Worker → Meilisearch). Currently wired:
   `SearchSyncConsumer`, `OrderProcessingConsumer` (auto-advances a new
   `SellerOrder` NEW → PROCESSING), `NotificationsConsumer` (notifies the
-  seller), `AuctionDeadlineConsumer` (ends auctions / expires unclaimed
+  seller), `EmailConsumer` (sends the buyer a payment-receipt email via
+  `EmailService`/Resend on `OrderPlaced` — standalone like
+  `SearchSyncConsumer`, re-reads Order+buyer from Postgres inside the
+  idempotency transaction rather than trusting the event payload or
+  importing `OrdersModule`; a Resend failure is logged and swallowed,
+  never thrown, since email is best-effort, not a source of truth),
+  `AuctionDeadlineConsumer` (ends auctions / expires unclaimed
   wins — see "Auction bidding" below), `RealtimeConsumer` (WebSocket
   fan-out — see "Real-time layer" below).
 - **Scheduled (delayed) jobs are NOT the outbox pattern** — a job for a

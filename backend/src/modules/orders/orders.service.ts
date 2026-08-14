@@ -32,6 +32,7 @@ import {
   CheckoutSellerLineInput,
   OrdersRepository,
   OrderWithSellerOrders,
+  SellerOrderWithOrderContext,
 } from './domain/orders.repository';
 import { ORDER_PLACED_EVENT } from './domain/events/order-placed.event';
 import { SELLER_ORDER_CREATED_EVENT } from './domain/events/seller-order-created.event';
@@ -71,6 +72,18 @@ export class OrdersService {
 
   findByBuyerId(buyerId: string): Promise<OrderWithSellerOrders[]> {
     return this.ordersRepository.findByBuyerId(buyerId);
+  }
+
+  // Seller dashboard's "own SellerOrders" list. sellerId is resolved
+  // from the caller's own approved profile, exactly like product/auction
+  // creation — never accepted as a request param, so a seller cannot
+  // browse another seller's orders by editing an id in the URL.
+  async findMySellerOrders(
+    callerId: string,
+  ): Promise<SellerOrderWithOrderContext[]> {
+    const sellerProfile =
+      await this.sellersService.getOwnApprovedSellerProfileOrThrow(callerId);
+    return this.ordersRepository.findBySellerId(sellerProfile.id);
   }
 
   async findById(
@@ -263,12 +276,33 @@ export class OrdersService {
         );
       }
 
+      // The winning bid is a LOT price (the whole quantity, not per
+      // unit — see Auction.quantity) — divided evenly across units so
+      // OrderItem's quantity genuinely reflects how much stock this win
+      // consumes, letting it flow through the exact same
+      // decrementStockForCheckout(productId, quantity) path as an
+      // ordinary cart line below. A lot size in the single digits (the
+      // realistic range for this kind of listing) rounds back to the
+      // original bid to the cent; a pathologically large quantity could
+      // drift by a cent or two, same class of rounding a per-seat price
+      // split has anywhere.
       const line: CheckoutLine = {
         productId: auction.productId,
         sellerId: auction.sellerId,
-        quantity: 1,
-        unitPrice: Number(auction.currentHighestBid),
+        quantity: auction.quantity,
+        unitPrice: Number(auction.currentHighestBid) / auction.quantity,
       };
+      // The lot has been held (not consumed) since the auction was
+      // created — see BiddingService.createAuction. Release the hold
+      // FIRST so the decrement below sees these units as free: its guard
+      // is `quantityAvailable - quantityReserved >= quantity`, which this
+      // auction's own reservation would otherwise fail. Same transaction,
+      // so the pair can't half-apply.
+      await this.productsService.releaseAuctionReservation(
+        tx,
+        auction.productId,
+        auction.quantity,
+      );
       const result = await this.executeOrderTransaction(
         tx,
         callerId,
@@ -522,6 +556,7 @@ export class OrdersService {
       payload: {
         sellerOrderId: sellerOrder.id,
         orderId: sellerOrder.orderId,
+        buyerId: order.buyerId,
         status: sellerOrder.status,
         orderStatus: order.status,
       },

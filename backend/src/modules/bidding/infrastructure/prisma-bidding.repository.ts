@@ -27,8 +27,18 @@ export class PrismaBiddingRepository implements BiddingRepository {
     });
   }
 
-  createAuction(data: CreateAuctionInput): Promise<Auction> {
-    return this.prisma.auction.create({ data });
+  findAuctionsForBidder(bidderId: string): Promise<Auction[]> {
+    return this.prisma.auction.findMany({
+      where: { bids: { some: { bidderId } } },
+      orderBy: { endsAt: 'desc' },
+    });
+  }
+
+  createAuction(
+    tx: Prisma.TransactionClient,
+    data: CreateAuctionInput,
+  ): Promise<Auction> {
+    return tx.auction.create({ data });
   }
 
   listBidsForAuction(auctionId: string): Promise<Bid[]> {

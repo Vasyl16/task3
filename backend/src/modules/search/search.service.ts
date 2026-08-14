@@ -68,7 +68,13 @@ export class SearchService {
           sellerId: hit.sellerId,
           sellerName: hit.sellerName,
           sellerRating: hit.sellerRating,
+          type: hit.type,
           inStock: hit.inStock,
+          // ?? false: a document indexed before this field existed
+          // (not yet re-synced by any subsequent product/auction event)
+          // has it genuinely absent, not just falsy — never surface
+          // `undefined` on a boolean field in the API response.
+          hasActiveAuction: hit.hasActiveAuction ?? false,
         })),
         total: result.estimatedTotalHits ?? result.hits.length,
         page,
@@ -90,6 +96,7 @@ export class SearchService {
     const clauses: string[] = [];
     if (query.categoryId) clauses.push(`categoryId = "${query.categoryId}"`);
     if (query.sellerId) clauses.push(`sellerId = "${query.sellerId}"`);
+    if (query.type) clauses.push(`type = "${query.type}"`);
     if (query.minPrice !== undefined)
       clauses.push(`basePrice >= ${query.minPrice}`);
     if (query.maxPrice !== undefined)

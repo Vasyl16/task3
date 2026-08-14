@@ -2,7 +2,9 @@ import { Controller, Get, Query } from '@nestjs/common';
 import { Public } from '../../core/auth/decorators/public.decorator';
 import { SearchService } from './search.service';
 import { SearchQueryDto } from './dto/search-query.dto';
+import { ApiTags } from '@nestjs/swagger';
 
+@ApiTags('search')
 @Controller('search')
 export class SearchController {
   constructor(private readonly searchService: SearchService) {}

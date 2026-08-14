@@ -13,6 +13,7 @@ import { SELLER_ORDER_STATUS_CHANGED_EVENT } from '../../../modules/orders/domai
 import {
   auctionRoom,
   authoritativeSourceForRoom,
+  notificationRoom,
   orderRoom,
   productRoom,
   RealtimeEventName,
@@ -116,7 +117,8 @@ export class RealtimeConsumer extends DomainEventConsumer {
       }
       case AUCTION_ENDED_EVENT: {
         const auctionId = payload.auctionId as string;
-        return [
+        const winningBidderId = payload.winningBidderId as string | null;
+        const envelopes = [
           this.envelope(
             auctionRoom(auctionId),
             RealtimeEventName.AUCTION_ENDED,
@@ -124,10 +126,29 @@ export class RealtimeConsumer extends DomainEventConsumer {
             authoritativeSourceForRoom(RealtimeRoomType.AUCTION, auctionId),
           ),
         ];
+        // Also pokes the winner's own notification room so their bell/
+        // notifications page updates instantly — NotificationsConsumer
+        // is what actually creates the Notification row (this is only a
+        // hint to refetch it; see notification-created's payload shape).
+        if (winningBidderId) {
+          envelopes.push(
+            this.envelope(
+              notificationRoom(winningBidderId),
+              RealtimeEventName.NOTIFICATION_CREATED,
+              { userId: winningBidderId, type: 'AUCTION_WON' },
+              authoritativeSourceForRoom(
+                RealtimeRoomType.NOTIFICATION,
+                winningBidderId,
+              ),
+            ),
+          );
+        }
+        return envelopes;
       }
       case SELLER_ORDER_STATUS_CHANGED_EVENT: {
         const orderId = payload.orderId as string;
         const sellerOrderId = payload.sellerOrderId as string;
+        const buyerId = payload.buyerId as string;
         return [
           this.envelope(
             orderRoom(orderId),
@@ -144,6 +165,17 @@ export class RealtimeConsumer extends DomainEventConsumer {
               sellerOrderId,
               orderId,
             ),
+          ),
+          // Also pokes the buyer's own notification room, on every
+          // transition — harmless even for one NotificationsConsumer
+          // decides isn't notification-worthy (e.g. NEW -> PROCESSING):
+          // the frontend just refetches and finds nothing new. See the
+          // identical AuctionEnded case below.
+          this.envelope(
+            notificationRoom(buyerId),
+            RealtimeEventName.NOTIFICATION_CREATED,
+            { userId: buyerId, type: 'SELLER_ORDER_STATUS_CHANGED' },
+            authoritativeSourceForRoom(RealtimeRoomType.NOTIFICATION, buyerId),
           ),
         ];
       }

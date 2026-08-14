@@ -156,6 +156,11 @@ model Product {
   name        String
   slug        String        @unique
   description String?
+  // A public path served by ServeStaticModule (e.g. "/uploads/products/
+  // <uuid>.jpg"), never an absolute filesystem path or external URL —
+  // see ProductsController's image upload route. Null until a seller
+  // uploads one; the frontend falls back to a generated placeholder.
+  imageUrl    String?
   basePrice   Decimal       @db.Decimal(12, 2)
   type        ProductType   @default(FIXED_PRICE)
   status      ProductStatus @default(DRAFT)
@@ -226,6 +231,14 @@ model Auction {
   // the starting price, for the first bid) — see
   // BiddingService.computeMinAcceptableBid.
   minBidIncrement Decimal @db.Decimal(12, 2)
+  // How many units this auction is for — awarded as one lot to the
+  // single winning bidder (never split across multiple winners). Validated
+  // at creation against the product's currently-uncommitted stock (available
+  // minus what's already committed to this product's other ACTIVE/SCHEDULED
+  // auctions — see BiddingService.createAuction), so the sum auctioned can
+  // never exceed what's actually in stock. Consumed 1:1 by
+  // OrdersService.checkoutAuctionWin's stock decrement on checkout.
+  quantity        Int     @default(1)
 
   // Denormalized current-winner cache, updated transactionally with each
   // accepted bid — avoids a join for the common "show current price" read.
@@ -453,22 +466,40 @@ model LedgerEntry {
   @@index([sellerId, createdAt])
 }
 
+// REQUESTED is the saga's starting state, PROCESSED and FAILED its two
+// terminal ones. FAILED means the payment provider refused the refund
+// and every retry is exhausted — the money is still owed to the buyer,
+// so it is a state a human has to resolve, NOT a silent dead end (see
+// RefundConsumer). APPROVED/REJECTED belong to the separate, manual
+// buyer-requested refund flow.
 enum RefundStatus {
   REQUESTED
   APPROVED
   REJECTED
   PROCESSED
+  FAILED
 }
 
 model Refund {
-  id            String       @id @default(uuid())
+  id            String      @id @default(uuid())
   sellerOrderId String
-  sellerOrder   SellerOrder  @relation(fields: [sellerOrderId], references: [id], onDelete: Restrict)
-  requestedById String
-  requestedBy   User         @relation("RefundRequester", fields: [requestedById], references: [id], onDelete: Restrict)
-  amount        Decimal      @db.Decimal(12, 2)
+  sellerOrder   SellerOrder @relation(fields: [sellerOrderId], references: [id], onDelete: Restrict)
+  // NULL when the system opened this refund itself, which is what a
+  // cancellation does — nobody "requested" it, the saga did. A non-null
+  // value means a real person asked for it through the manual flow.
+  requestedById String?
+  requestedBy   User?       @relation("RefundRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+  amount        Decimal     @db.Decimal(12, 2)
   reason        String?
   status        RefundStatus @default(REQUESTED)
+
+  // Payment-provider correlation. gatewayRef is what a real provider
+  // hands back (and what makes a retried call idempotent on THEIR side);
+  // attempts/failureReason are what an operator needs to understand a
+  // FAILED refund without digging through logs.
+  gatewayRef    String?
+  attempts      Int     @default(0)
+  failureReason String?
 
   resolvedById String?
   resolvedBy   User?     @relation("RefundResolver", fields: [resolvedById], references: [id], onDelete: SetNull)

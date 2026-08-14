@@ -7,7 +7,11 @@ import type { AuthenticatedUser } from '../../core/auth/authenticated-user.inter
 import { SellersService } from './sellers.service';
 import { ApplySellerDto } from './dto/apply-seller.dto';
 import { ReviewSellerDto } from './dto/review-seller.dto';
+import { ApiTags } from '@nestjs/swagger';
+import { ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { ApiAuth } from '../../core/openapi/api-auth.decorator';
 
+@ApiTags('sellers')
 @Controller('sellers')
 export class SellersController {
   constructor(private readonly sellersService: SellersService) {}
@@ -27,6 +31,18 @@ export class SellersController {
   // caller — never a client-supplied userId (IDOR prevention).
   @Roles(UserRole.CUSTOMER)
   @Post('apply')
+  @ApiAuth(UserRole.CUSTOMER)
+  @ApiOperation({
+    summary: 'Apply to become a seller',
+    description:
+      'The applicant is the authenticated caller \u2014 ApplySellerDto has no ' +
+      'userId field. Creates a PENDING profile; an admin must approve it ' +
+      'before the account gains the SELLER role.',
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'This account already has an application.',
+  })
   apply(@CurrentUser() user: AuthenticatedUser, @Body() dto: ApplySellerDto) {
     return this.sellersService.apply(user.id, dto);
   }
@@ -35,6 +51,14 @@ export class SellersController {
   // client-supplied reviewedByUserId.
   @Roles(UserRole.ADMIN)
   @Patch(':id/review')
+  @ApiAuth(UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Approve or reject an application (ADMIN)',
+    description:
+      'Updates the profile status and the user\u2019s role in ONE transaction, ' +
+      'so the two can never drift apart. Note that an already-issued ' +
+      'access token keeps its old role claim until it expires.',
+  })
   review(
     @Param('id') id: string,
     @CurrentUser() user: AuthenticatedUser,

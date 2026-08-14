@@ -4,10 +4,12 @@ import type { AuthenticatedUser } from '../../core/auth/authenticated-user.inter
 import { DisputesService } from './disputes.service';
 import { CreateDisputeDto } from './dto/create-dispute.dto';
 import { ListDisputesQuery } from './dto/list-disputes.query';
+import { ApiTags } from '@nestjs/swagger';
 
 // Customer-facing half of disputes. The admin half (queue + rulings)
 // lives on AdminController, behind a class-level @Roles(ADMIN) — see
 // modules/admin/admin.controller.ts.
+@ApiTags('disputes')
 @Controller('disputes')
 export class DisputesController {
   constructor(private readonly disputesService: DisputesService) {}

@@ -27,6 +27,7 @@ import { CreateAuctionDto } from './dto/create-auction.dto';
 import { PlaceBidDto } from './dto/place-bid.dto';
 import { BID_PLACED_EVENT } from './domain/events/bid-placed.event';
 import { AUCTION_ENDED_EVENT } from './domain/events/auction-ended.event';
+import { PRODUCT_UPDATED_EVENT } from '../products/domain/events/product-updated.event';
 
 // Bounded retry — bid placement is cheap to retry (a single conditional
 // UPDATE), so a genuine collision costs at most a couple of extra
@@ -60,6 +61,10 @@ export class BiddingService {
     sellerId?: string;
   }): Promise<Auction[]> {
     return this.biddingRepository.findAuctions(filter);
+  }
+
+  findAuctionsForBidder(bidderId: string): Promise<Auction[]> {
+    return this.biddingRepository.findAuctionsForBidder(bidderId);
   }
 
   async findAuctionById(id: string): Promise<Auction> {
@@ -97,16 +102,97 @@ export class BiddingService {
     const startsAt = new Date(dto.startsAt);
     const endsAt = new Date(dto.endsAt);
     const startsImmediately = startsAt <= new Date();
-    const auction = await this.biddingRepository.createAuction({
-      productId: dto.productId,
-      sellerId: sellerProfile.id,
-      startingPrice: dto.startingPrice,
-      minBidIncrement: dto.minBidIncrement,
-      startsAt,
-      endsAt,
-      status: startsImmediately
-        ? AuctionStatus.ACTIVE
-        : AuctionStatus.SCHEDULED,
+    const correlationId = this.correlationIdService.getId() ?? randomUUID();
+    // The product goes from "not currently biddable" to "biddable" (or
+    // will be shortly, if SCHEDULED) the instant this commits — search
+    // needs to know, or the product sits in results looking purchasable
+    // via an auction that was never actually created. Same transaction
+    // as the row itself, so search-sync can never observe one without
+    // the other.
+    const auction = await this.prisma.$transaction(async (tx) => {
+      // At most one live lot per product, period — not "as many as
+      // stock allows split across auctions." Two simultaneous listings
+      // for the same product is exactly the confusing duplicate-looking
+      // state this rule exists to prevent, regardless of whether stock
+      // could technically cover both.
+      const existingAuctions = await this.biddingRepository.findAuctions({
+        productId: dto.productId,
+      });
+      if (
+        existingAuctions.some(
+          (a) =>
+            a.status === AuctionStatus.ACTIVE ||
+            a.status === AuctionStatus.SCHEDULED,
+        )
+      ) {
+        throw new BadRequestException(
+          'This product already has an active or upcoming auction — end or wait for it before creating another',
+        );
+      }
+
+      // What's free to auction is the real stock count minus the units
+      // this product's OTHER auctions still have a claim on — derived
+      // from the auctions themselves, never from Inventory's
+      // quantityReserved. That counter is a denormalized cache of the
+      // same fact, and a cache that has drifted (or was written by an
+      // older, buggier version of this code) would silently refuse to
+      // auction stock the seller genuinely has. The auction rows are the
+      // source of truth, so they're what this decides on.
+      //
+      // Only ENDED can contribute here: ACTIVE/SCHEDULED were just
+      // rejected outright, and COMPLETED/EXPIRED/CANCELLED have no
+      // remaining claim. An ENDED auction's winner still holds a
+      // checkout window, so those units are not free to re-auction.
+      const committedToOtherAuctions = existingAuctions
+        .filter((a) => a.status === AuctionStatus.ENDED)
+        .reduce((sum, a) => sum + a.quantity, 0);
+
+      const [product] =
+        await this.productsService.findManyWithInventoryForCheckout(tx, [
+          dto.productId,
+        ]);
+      const available =
+        (product?.inventory?.quantityAvailable ?? 0) - committedToOtherAuctions;
+      if (dto.quantity > available) {
+        throw new BadRequestException(
+          available > 0
+            ? `Only ${available} unit(s) are available to auction`
+            : 'No stock is available to auction',
+        );
+      }
+
+      // Hold the lot: the units stay in stock (an auctioned product is
+      // not "out of stock" while it's being bid on) but stop being
+      // sellable through the cart, so the seller can't sell the same
+      // unit twice. Released if the auction ends with no winner or the
+      // winner lets their window lapse; converted into a real decrement
+      // by OrdersService.checkoutAuctionWin.
+      await this.productsService.reserveStockForAuction(
+        tx,
+        dto.productId,
+        dto.quantity,
+      );
+
+      const created = await this.biddingRepository.createAuction(tx, {
+        productId: dto.productId,
+        sellerId: sellerProfile.id,
+        quantity: dto.quantity,
+        startingPrice: dto.startingPrice,
+        minBidIncrement: dto.minBidIncrement,
+        startsAt,
+        endsAt,
+        status: startsImmediately
+          ? AuctionStatus.ACTIVE
+          : AuctionStatus.SCHEDULED,
+      });
+      await this.outboxService.record(tx, {
+        aggregateType: 'Product',
+        aggregateId: dto.productId,
+        eventType: PRODUCT_UPDATED_EVENT,
+        payload: { productId: dto.productId },
+        correlationId,
+      });
+      return created;
     });
 
     if (!startsImmediately) {
@@ -158,9 +244,21 @@ export class BiddingService {
     dto: PlaceBidDto,
   ): Promise<Bid> {
     const correlationId = this.correlationIdService.getId() ?? randomUUID();
+    // Resolved once, outside the retry loop below — ownership doesn't
+    // change between attempts. `null` (no seller profile at all, the
+    // common case for a buyer) never matches a real auction.sellerId, so
+    // this only ever rejects a caller whose OWN resolved profile is the
+    // one that created the auction — never a client-supplied id (see
+    // .claude/rules/backend.md).
+    const callerSellerProfile =
+      await this.sellersService.findByUserId(callerId);
 
     for (let attempt = 0; attempt < MAX_BID_ATTEMPTS; attempt++) {
       const auction = await this.findAuctionById(auctionId); // 404s if missing
+      if (callerSellerProfile?.id === auction.sellerId) {
+        this.metrics.recordBid('rejected');
+        throw new ForbiddenException('You cannot bid on your own auction');
+      }
       this.assertAcceptingBids(auction);
 
       const minAcceptable = this.computeMinAcceptableBid(auction);
@@ -298,6 +396,18 @@ export class BiddingService {
       if (!result) {
         return null;
       }
+      // No winner means nothing will ever consume this lot — give the
+      // held units straight back. A winner's hold stays put until they
+      // check out (or their window lapses, see
+      // expireCheckoutWindowIfUnclaimed). Inside the guarded transition,
+      // so a redelivered job can't release twice.
+      if (!hasWinner) {
+        await this.productsService.releaseAuctionReservation(
+          tx,
+          auction.productId,
+          auction.quantity,
+        );
+      }
       await this.outboxService.record(tx, {
         aggregateType: 'Auction',
         aggregateId: auctionId,
@@ -307,6 +417,17 @@ export class BiddingService {
           winningBidderId: auction.currentHighestBidderId,
           winningAmount: auction.currentHighestBid?.toString() ?? null,
         },
+        correlationId,
+      });
+      // The product just stopped being biddable (ACTIVE is the only
+      // status this transitions FROM) — search needs to stop showing it
+      // as though there's a live auction to bid on. Same transaction, so
+      // this can never fire without the status change actually landing.
+      await this.outboxService.record(tx, {
+        aggregateType: 'Product',
+        aggregateId: auction.productId,
+        eventType: PRODUCT_UPDATED_EVENT,
+        payload: { productId: auction.productId },
         correlationId,
       });
       return result;
@@ -334,14 +455,25 @@ export class BiddingService {
   }
 
   async expireCheckoutWindowIfUnclaimed(auctionId: string): Promise<void> {
-    await this.prisma.$transaction((tx) =>
-      this.biddingRepository.transitionStatusIfCurrent(
+    await this.prisma.$transaction(async (tx) => {
+      const expired = await this.biddingRepository.transitionStatusIfCurrent(
         tx,
         auctionId,
         AuctionStatus.ENDED,
         AuctionStatus.EXPIRED,
-      ),
-    );
+      );
+      // The win was never claimed, so the lot the winner was holding
+      // goes back on sale. Guarded by the transition above returning
+      // non-null — a redelivered job finds the auction already EXPIRED
+      // and releases nothing.
+      if (expired) {
+        await this.productsService.releaseAuctionReservation(
+          tx,
+          expired.productId,
+          expired.quantity,
+        );
+      }
+    });
   }
 
   // ===================== Winner checkout support =====================

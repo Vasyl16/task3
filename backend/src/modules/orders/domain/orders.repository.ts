@@ -10,6 +10,15 @@ import type {
 
 export type OrderWithSellerOrders = Order & { sellerOrders: SellerOrder[] };
 
+// Minimal parent-order context for a seller's own SellerOrder list — just
+// enough to show which order it's part of and when it was placed,
+// without exposing the buyer's identity or the OTHER sellers' lines from
+// the same multi-vendor order (that's `Order`/`findById`, buyer/admin
+// only).
+export type SellerOrderWithOrderContext = SellerOrder & {
+  order: Pick<Order, 'id' | 'status' | 'placedAt'>;
+};
+
 export interface CheckoutOrderItemInput {
   productId: string;
   quantity: number;
@@ -43,6 +52,11 @@ export abstract class OrdersRepository {
   abstract findByBuyerId(buyerId: string): Promise<OrderWithSellerOrders[]>;
   abstract findById(id: string): Promise<OrderWithSellerOrders | null>;
   abstract findSellerOrderById(id: string): Promise<SellerOrder | null>;
+  // Seller dashboard's "own SellerOrders" list — scoped by sellerId,
+  // never trusted from the client (see OrdersService.findBySellerId).
+  abstract findBySellerId(
+    sellerId: string,
+  ): Promise<SellerOrderWithOrderContext[]>;
 
   // Creates the parent Order, one SellerOrder + OrderItems per seller
   // line, and each SellerOrder's initial SALE/COMMISSION ledger entries —

@@ -6,9 +6,11 @@ import type { AuthenticatedUser } from '../../core/auth/authenticated-user.inter
 import { SellersService } from '../sellers/sellers.service';
 import { AnalyticsService } from './analytics.service';
 import { AnalyticsPeriodQuery } from './dto/analytics-period.query';
+import { ApiTags } from '@nestjs/swagger';
 
 // Seller-facing analytics only. Platform-wide figures and exports live on
 // AdminController, behind @Roles(ADMIN).
+@ApiTags('analytics')
 @Controller('analytics')
 export class AnalyticsController {
   constructor(

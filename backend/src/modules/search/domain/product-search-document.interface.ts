@@ -21,5 +21,16 @@ export interface ProductSearchDocument {
   type: string;
   inStock: boolean;
   quantityAvailable: number;
+  // Only meaningful for type === 'AUCTION': whether the product
+  // currently has an ACTIVE or SCHEDULED auction — i.e. whether there's
+  // actually something to click through to and bid on right now. A
+  // product can accumulate multiple auctions over its lifetime (each
+  // re-listed after the last one ends), so this is NOT "has ever had an
+  // auction" — an AUCTION product between listings is just as
+  // un-actionable as one that's never been auctioned. Always false for
+  // FIXED_PRICE. Re-synced whenever an auction is created or ends (see
+  // BiddingService.createAuction/endAuction) — the two, and only two,
+  // transitions that flip it.
+  hasActiveAuction: boolean;
   createdAt: number;
 }

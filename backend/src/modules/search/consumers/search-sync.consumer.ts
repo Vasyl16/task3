@@ -104,15 +104,24 @@ export class SearchSyncConsumer extends DomainEventConsumer {
       return;
     }
 
-    const [category, seller, inventory, ratingAgg] = await Promise.all([
-      tx.category.findUniqueOrThrow({ where: { id: product.categoryId } }),
-      tx.sellerProfile.findUniqueOrThrow({ where: { id: product.sellerId } }),
-      tx.inventory.findUnique({ where: { productId } }),
-      tx.review.aggregate({
-        where: { sellerId: product.sellerId },
-        _avg: { rating: true },
-      }),
-    ]);
+    const [category, seller, inventory, ratingAgg, hasActiveAuction] =
+      await Promise.all([
+        tx.category.findUniqueOrThrow({ where: { id: product.categoryId } }),
+        tx.sellerProfile.findUniqueOrThrow({ where: { id: product.sellerId } }),
+        tx.inventory.findUnique({ where: { productId } }),
+        tx.review.aggregate({
+          where: { sellerId: product.sellerId },
+          _avg: { rating: true },
+        }),
+        // Only ever relevant for AUCTION products, but cheap enough to
+        // just always ask — skipping the query for FIXED_PRICE would
+        // save one round-trip at the cost of a type-conditional branch
+        // for no real benefit (product.type never has an AUCTION row
+        // otherwise).
+        tx.auction.count({
+          where: { productId, status: { in: ['ACTIVE', 'SCHEDULED'] } },
+        }),
+      ]);
 
     const doc: ProductSearchDocument = {
       id: product.id,
@@ -130,6 +139,7 @@ export class SearchSyncConsumer extends DomainEventConsumer {
           (inventory?.quantityReserved ?? 0) >
         0,
       quantityAvailable: inventory?.quantityAvailable ?? 0,
+      hasActiveAuction: hasActiveAuction > 0,
       createdAt: product.createdAt.getTime(),
     };
 

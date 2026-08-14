@@ -12,6 +12,7 @@ export interface CreateProductWithInventoryInput {
   name: string;
   slug: string;
   description?: string;
+  imageUrl?: string;
   basePrice: number;
   type: ProductType;
   initialQuantity: number;
@@ -44,7 +45,12 @@ export abstract class ProductsRepository {
   abstract update(
     tx: Prisma.TransactionClient,
     id: string,
-    data: Partial<{ name: string; description: string; basePrice: number }>,
+    data: Partial<{
+      name: string;
+      description: string;
+      basePrice: number;
+      imageUrl: string;
+    }>,
   ): Promise<Product>;
   // Soft delete only — sets status to ARCHIVED. Never a physical DELETE:
   // an archived product may still be referenced by existing carts,
@@ -71,19 +77,40 @@ export abstract class ProductsRepository {
     tx: Prisma.TransactionClient,
     ids: string[],
   ): Promise<ProductWithInventory[]>;
-  // Conditional, atomic decrement: `WHERE quantityAvailable >= quantity`
-  // is itself the concurrency guard (see ProductsService for why this is
-  // preferred over a bare optimistic version compare-and-swap here) —
-  // returns null if insufficient stock or a concurrent checkout already
-  // consumed it, never a negative quantityAvailable. On success returns
-  // the resulting Inventory row so the caller can record an accurate
-  // InventoryUpdated event without a second read from outside the
-  // transaction.
+  // Conditional, atomic decrement guarded by
+  // `WHERE quantityAvailable - quantityReserved >= quantity` — itself
+  // the concurrency guard (see ProductsService for why this is preferred
+  // over a bare optimistic version compare-and-swap here). Returns null
+  // if stock is insufficient, a concurrent checkout already consumed it,
+  // or the units are held by a live auction — never a negative or
+  // oversold quantityAvailable. On success returns the resulting
+  // Inventory row so the caller can record an accurate InventoryUpdated
+  // event without a second read from outside the transaction.
   abstract decrementStock(
     tx: Prisma.TransactionClient,
     productId: string,
     quantity: number,
   ): Promise<Inventory | null>;
+  // Holds units for a live auction lot WITHOUT consuming them — stock
+  // stays on hand (and visible as such) until the winner checks out.
+  // Returns null when the product doesn't physically have the units.
+  // Unlike decrementStock this does NOT gate on quantityReserved — see
+  // the implementation for why, and BiddingService.createAuction for
+  // where the "already claimed" question is actually decided.
+  abstract reserveStock(
+    tx: Prisma.TransactionClient,
+    productId: string,
+    quantity: number,
+  ): Promise<Inventory | null>;
+  // Frees a reserveStock hold: the auction ended with no winner, the
+  // winner's checkout window lapsed, or the hold is being converted into
+  // a sale. Always called behind a guarded status transition, so it
+  // can't double-release.
+  abstract releaseReservation(
+    tx: Prisma.TransactionClient,
+    productId: string,
+    quantity: number,
+  ): Promise<Inventory>;
   // Restores stock — e.g. when a SellerOrder is cancelled. See
   // OrdersService.updateSellerOrderStatus. Returns the resulting row for
   // the same reason decrementStock does.
@@ -92,4 +119,18 @@ export abstract class ProductsRepository {
     productId: string,
     quantity: number,
   ): Promise<Inventory>;
+
+  // Seller-initiated stock correction (via ProductsService.update) —
+  // distinct from decrementStock/restoreStock's relative adjustments:
+  // this sets quantityAvailable to an absolute value the seller chose.
+  // Still optimistically locked on `version` (see backend.md — never a
+  // naive read-then-write on inventory): returns null if the row's
+  // version has moved since it was read inside this same transaction
+  // (a concurrent checkout/restore committed in between), so the caller
+  // can reject the request rather than silently clobber it.
+  abstract setStock(
+    tx: Prisma.TransactionClient,
+    productId: string,
+    quantityAvailable: number,
+  ): Promise<Inventory | null>;
 }

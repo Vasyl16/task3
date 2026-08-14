@@ -4,6 +4,7 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import type { AppConfig } from './config/configuration';
 import { AppLogger } from './core/logging/app-logger.service';
+import { setupSwagger, SWAGGER_PATH } from './core/openapi/swagger.setup';
 import { ConfiguredIoAdapter } from './infrastructure/realtime/realtime.adapter';
 
 async function bootstrap() {
@@ -28,7 +29,15 @@ async function bootstrap() {
     }),
   );
 
-  await app.listen(configService.get('port', { infer: true }));
+  // Registered after the global pipe so the documented request shapes
+  // match what validation actually accepts.
+  setupSwagger(app);
+
+  const port = configService.get('port', { infer: true });
+  await app.listen(port);
+  app
+    .get(AppLogger)
+    .log({ event: 'app.started', port, docs: `/${SWAGGER_PATH}` });
 }
 // void: bootstrap() is the process entrypoint — there is no caller to
 // hand the promise to, and an unhandled rejection here should crash.

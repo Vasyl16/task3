@@ -10,7 +10,15 @@
 // regardless of what any client was shown.
 export const INVENTORY_UPDATED_EVENT = 'InventoryUpdated';
 
-export type InventoryUpdateReason = 'CHECKOUT' | 'CANCELLATION';
+// AUCTION_HOLD/AUCTION_RELEASE move quantityReserved only — the units
+// stay in stock, they just stop being sellable through the cart while an
+// auction lot has a claim on them.
+export type InventoryUpdateReason =
+  | 'CHECKOUT'
+  | 'CANCELLATION'
+  | 'SELLER_ADJUSTMENT'
+  | 'AUCTION_HOLD'
+  | 'AUCTION_RELEASE';
 
 export interface InventoryUpdatedEvent {
   productId: string;

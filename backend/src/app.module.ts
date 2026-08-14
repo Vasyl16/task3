@@ -1,5 +1,7 @@
+import { join } from 'node:path';
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { ServeStaticModule } from '@nestjs/serve-static';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import configuration from './config/configuration';
@@ -24,6 +26,7 @@ import { PaymentsLedgerModule } from './modules/payments-ledger/payments-ledger.
 import { DisputesModule } from './modules/disputes/disputes.module';
 import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
+import { EmailModule } from './modules/email/email.module';
 import { AdminModule } from './modules/admin/admin.module';
 
 @Module({
@@ -33,6 +36,16 @@ import { AdminModule } from './modules/admin/admin.module';
       load: [configuration],
       validationSchema: envValidationSchema,
       validationOptions: { abortEarly: false },
+    }),
+    // Serves whatever ProductsController's image-upload route writes to
+    // disk (see infrastructure/product-image.multer-config.ts) back out
+    // at a public URL — "uploads/products/<file>" on disk becomes
+    // "/uploads/products/<file>" over HTTP. Local disk storage, not
+    // object storage: proportionate to a dev/demo marketplace with no
+    // multi-instance deployment where a shared filesystem would matter.
+    ServeStaticModule.forRoot({
+      rootPath: join(process.cwd(), 'uploads'),
+      serveRoot: '/uploads',
     }),
     CoreModule,
     PrismaModule,
@@ -63,6 +76,7 @@ import { AdminModule } from './modules/admin/admin.module';
     SearchModule,
     AnalyticsModule,
     NotificationsModule,
+    EmailModule,
     // Last: the admin surface composes the modules above and nothing
     // imports it back.
     AdminModule,

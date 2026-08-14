@@ -14,6 +14,7 @@ import {
   CreateFromCheckoutResult,
   OrdersRepository,
   OrderWithSellerOrders,
+  SellerOrderWithOrderContext,
 } from '../domain/orders.repository';
 
 @Injectable()
@@ -37,6 +38,16 @@ export class PrismaOrdersRepository implements OrdersRepository {
 
   findSellerOrderById(id: string): Promise<SellerOrder | null> {
     return this.prisma.sellerOrder.findUnique({ where: { id } });
+  }
+
+  findBySellerId(sellerId: string): Promise<SellerOrderWithOrderContext[]> {
+    return this.prisma.sellerOrder.findMany({
+      where: { sellerId },
+      include: {
+        order: { select: { id: true, status: true, placedAt: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
   async createFromCheckout(

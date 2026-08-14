@@ -1,8 +1,27 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import type { Prisma, User, UserRole } from '@prisma/client';
+import { UserRole, type Prisma, type User } from '@prisma/client';
+import type { AuthenticatedUser } from '../../core/auth/authenticated-user.interface';
 import { UsersRepository } from './domain/users.repository';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
+
+// Never return the raw Prisma User to a client — it carries
+// passwordHash, which has no business leaving the server under any
+// circumstance (not even to the user it belongs to).
+export interface PublicUser {
+  id: string;
+  email: string;
+  name: string;
+  avatarUrl: string | null;
+  role: UserRole;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+function toPublicUser(user: User): PublicUser {
+  const { id, email, name, avatarUrl, role, createdAt, updatedAt } = user;
+  return { id, email, name, avatarUrl, role, createdAt, updatedAt };
+}
 
 @Injectable()
 export class UsersService {
@@ -36,5 +55,43 @@ export class UsersService {
     role: UserRole,
   ): Promise<User> {
     return this.usersRepository.updateRole(tx, id, role);
+  }
+
+  // ---- Client-facing entry points (UsersController only) ----
+  //
+  // Authorization AND response sanitization live here, not in the
+  // controller — same shape as OrdersService.findById(id, caller). This
+  // is the fix for a real IDOR: JwtAuthGuard (global) only ever proved
+  // the caller holds a valid token, never that they own the id in the
+  // URL. A valid token from ANY account used to be enough to read or
+  // edit ANY other user's profile.
+
+  // ADMIN may look up any profile (support/investigation); no one else
+  // may look up anyone but themselves.
+  async findByIdForCaller(
+    id: string,
+    caller: AuthenticatedUser,
+  ): Promise<PublicUser> {
+    if (caller.role !== UserRole.ADMIN && caller.id !== id) {
+      // 404, not 403 — same reasoning as OrdersService.findById: a 403
+      // would confirm this user id exists at all to someone with no
+      // business knowing that.
+      throw new NotFoundException(`User ${id} not found`);
+    }
+    return toPublicUser(await this.findById(id));
+  }
+
+  // Self only, even for ADMIN — there's no product requirement for an
+  // admin to edit someone else's name/avatar, so no exception is carved
+  // out for it here.
+  async updateForCaller(
+    id: string,
+    dto: UpdateUserDto,
+    caller: AuthenticatedUser,
+  ): Promise<PublicUser> {
+    if (caller.id !== id) {
+      throw new NotFoundException(`User ${id} not found`);
+    }
+    return toPublicUser(await this.update(id, dto));
   }
 }

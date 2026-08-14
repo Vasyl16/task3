@@ -8,7 +8,9 @@ export interface SearchResultItem {
   sellerId: string;
   sellerName: string;
   sellerRating: number | null;
+  type: string;
   inStock: boolean;
+  hasActiveAuction: boolean;
 }
 
 export interface SearchResult {

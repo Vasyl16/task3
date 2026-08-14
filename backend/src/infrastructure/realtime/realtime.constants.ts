@@ -1,6 +1,6 @@
 export const REALTIME_NAMESPACE = '/realtime';
 
-// The four subscribable room families. A room name is always
+// The five subscribable room families. A room name is always
 // `{type}:{id}` — see parseRoom, which is the ONLY thing that turns a
 // client-supplied string into one of these.
 export enum RealtimeRoomType {
@@ -8,15 +8,16 @@ export enum RealtimeRoomType {
   AUCTION = 'auction',
   ORDER = 'order',
   SELLER_ORDER = 'seller-order',
+  NOTIFICATION = 'notification',
 }
 
 // Which rooms are readable without an authenticated identity. A
 // product's stock level and an auction's current price are already
 // visible to anonymous visitors over REST (`GET /products/:id`,
 // `GET /auctions/:id` are @Public()), so gating them behind a socket
-// token would be theatre, not security. Orders are the opposite: they
-// are per-user data and require both a verified identity AND an
-// ownership check — see RealtimeRoomsService.authorize.
+// token would be theatre, not security. Orders (and notifications) are
+// the opposite: they are per-user data and require both a verified
+// identity AND an ownership check — see RealtimeRoomsService.authorize.
 const PUBLIC_ROOM_TYPES: ReadonlySet<RealtimeRoomType> = new Set([
   RealtimeRoomType.PRODUCT,
   RealtimeRoomType.AUCTION,
@@ -33,6 +34,7 @@ export enum RealtimeEventName {
   AUCTION_BID_UPDATED = 'auction.bid.updated',
   AUCTION_ENDED = 'auction.ended',
   SELLER_ORDER_STATUS_UPDATED = 'seller-order.status.updated',
+  NOTIFICATION_CREATED = 'notification.created',
 }
 
 // Client -> server message names.
@@ -88,6 +90,8 @@ export function authoritativeSourceForRoom(
       return `GET /orders/${id}`;
     case RealtimeRoomType.SELLER_ORDER:
       return orderId ? `GET /orders/${orderId}` : 'GET /orders';
+    case RealtimeRoomType.NOTIFICATION:
+      return 'GET /notifications';
   }
 }
 
@@ -105,4 +109,11 @@ export function orderRoom(orderId: string): string {
 
 export function sellerOrderRoom(sellerOrderId: string): string {
   return `${RealtimeRoomType.SELLER_ORDER}:${sellerOrderId}`;
+}
+
+// Keyed by userId directly (not a notification id) — one room per
+// recipient, not per notification, since a client subscribes to "my
+// notifications" as a whole, not to any single one.
+export function notificationRoom(userId: string): string {
+  return `${RealtimeRoomType.NOTIFICATION}:${userId}`;
 }
