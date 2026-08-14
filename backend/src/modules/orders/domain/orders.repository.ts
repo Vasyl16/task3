@@ -79,7 +79,10 @@ export abstract class OrdersRepository {
   abstract findAllForAdmin(filter: {
     status?: OrderStatus;
     buyerId?: string;
-  }): Promise<OrderWithSellerOrderItems[]>;
+    search?: string;
+    skip?: number;
+    take?: number;
+  }): Promise<{ items: OrderWithSellerOrderItems[]; total: number }>;
   abstract findSellerOrderById(id: string): Promise<SellerOrder | null>;
   // Seller dashboard's "own SellerOrders" list — scoped by sellerId,
   // never trusted from the client (see OrdersService.findBySellerId).

@@ -210,7 +210,7 @@ export class MetricsService {
   }
 
   recordInventoryMovement(
-    direction: 'reserved' | 'committed' | 'released',
+    direction: 'reserved' | 'committed' | 'released' | 'returned',
     units: number,
   ): void {
     this.inventoryUnits.inc({ direction }, units);

@@ -6,7 +6,6 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
-  OrderStatus,
   LedgerEntryType,
   ProductStatus,
   ProductType,
@@ -28,7 +27,10 @@ import { SellersService } from '../sellers/sellers.service';
 import { BiddingService } from '../bidding/bidding.service';
 import { computeCommission } from './domain/commission';
 import { aggregateOrderStatus } from './domain/order-status-aggregation';
-import { isValidSellerOrderTransition } from './domain/order-status-transitions';
+import {
+  canAdminForceCancel,
+  isValidSellerOrderTransition,
+} from './domain/order-status-transitions';
 import {
   CheckoutSellerLineInput,
   OrdersRepository,
@@ -39,6 +41,8 @@ import {
 import { ORDER_PLACED_EVENT } from './domain/events/order-placed.event';
 import { SELLER_ORDER_CREATED_EVENT } from './domain/events/seller-order-created.event';
 import { SELLER_ORDER_STATUS_CHANGED_EVENT } from './domain/events/seller-order-status-changed.event';
+import { toPageParams, type Paginated } from '../../core/pagination';
+import { ListOrdersQuery } from './dto/list-orders.query';
 import { UpdateSellerOrderStatusDto } from './dto/update-seller-order-status.dto';
 
 interface CheckoutLine {
@@ -89,11 +93,18 @@ export class OrdersService {
   }
 
   // Admin-only; @Roles(ADMIN) is enforced on AdminController.
-  listForAdmin(filter: {
-    status?: OrderStatus;
-    buyerId?: string;
-  }): Promise<OrderWithSellerOrderItems[]> {
-    return this.ordersRepository.findAllForAdmin(filter);
+  async listForAdmin(
+    query: ListOrdersQuery,
+  ): Promise<Paginated<OrderWithSellerOrderItems>> {
+    const { skip, take, page, limit } = toPageParams(query);
+    const { items, total } = await this.ordersRepository.findAllForAdmin({
+      status: query.status,
+      buyerId: query.buyerId,
+      search: query.search,
+      skip,
+      take,
+    });
+    return { items, total, page, limit };
   }
 
   async findById(
@@ -480,7 +491,15 @@ export class OrdersService {
     const sellerOrder = await this.findSellerOrderById(id); // 404s if missing
     await this.assertOwnsSellerOrderOrIsAdmin(sellerOrder, caller);
 
-    if (!isValidSellerOrderTransition(sellerOrder.status, dto.status)) {
+    const isAdminForceCancel =
+      caller.role === UserRole.ADMIN &&
+      dto.status === SellerOrderStatus.CANCELLED &&
+      canAdminForceCancel(sellerOrder.status);
+
+    if (
+      !isAdminForceCancel &&
+      !isValidSellerOrderTransition(sellerOrder.status, dto.status)
+    ) {
       throw new BadRequestException(
         `Cannot transition SellerOrder from ${sellerOrder.status} to ${dto.status}`,
       );
@@ -499,7 +518,15 @@ export class OrdersService {
         let restored = 0;
         let committed = 0;
         if (dto.status === SellerOrderStatus.CANCELLED) {
-          restored = await this.restoreStockAndReverseLedger(tx, updated);
+          // sellerOrder.status (not updated.status) is what the row was
+          // BEFORE this write — that's what decides whether there is
+          // still a hold to release or the units already shipped and
+          // need a genuine restock. See restoreStockAndReverseLedger.
+          restored = await this.restoreStockAndReverseLedger(
+            tx,
+            updated,
+            sellerOrder.status,
+          );
         } else if (dto.status === SellerOrderStatus.SHIPPED) {
           // Shipping is what finally consumes the stock the order has
           // been holding since checkout. Same transaction as the status
@@ -520,8 +547,13 @@ export class OrdersService {
       });
 
     if (restoredUnits > 0) {
-      // Again after commit, for the same reason as checkout.
-      this.metrics.recordInventoryMovement('released', restoredUnits);
+      // Again after commit, for the same reason as checkout. The label
+      // matches which of the two inventory ops actually ran — see
+      // restoreStockAndReverseLedger.
+      this.metrics.recordInventoryMovement(
+        canAdminForceCancel(sellerOrder.status) ? 'returned' : 'released',
+        restoredUnits,
+      );
     }
     if (committedUnits > 0) {
       this.metrics.recordInventoryMovement('committed', committedUnits);
@@ -626,20 +658,38 @@ export class OrdersService {
   private async restoreStockAndReverseLedger(
     tx: Prisma.TransactionClient,
     sellerOrder: SellerOrder,
+    previousStatus: SellerOrderStatus,
   ): Promise<number> {
     const items = await this.ordersRepository.findOrderItemsForSellerOrder(
       tx,
       sellerOrder.id,
     );
+    // Which inventory op applies depends on whether the hold was still
+    // there to release. A normal NEW/PROCESSING cancellation frees a
+    // reservation that never left quantityAvailable. An admin
+    // force-cancelling a SHIPPED/COMPLETED order (see
+    // canAdminForceCancel) is different: SHIPMENT already consumed that
+    // reservation, so there is nothing left to release — this is a
+    // genuine restock instead, same as a return.
+    const alreadyShipped = canAdminForceCancel(previousStatus);
+
     let restoredUnits = 0;
     for (const item of items) {
-      // Released, not restored: a cancelled order's units never left
-      // quantityAvailable in the first place.
-      await this.productsService.releaseReservationForCancellation(
-        tx,
-        item.productId,
-        item.quantity,
-      );
+      if (alreadyShipped) {
+        await this.productsService.returnStockAfterForceCancellation(
+          tx,
+          item.productId,
+          item.quantity,
+        );
+      } else {
+        // Released, not restored: a cancelled order's units never left
+        // quantityAvailable in the first place.
+        await this.productsService.releaseReservationForCancellation(
+          tx,
+          item.productId,
+          item.quantity,
+        );
+      }
       restoredUnits += item.quantity;
     }
 

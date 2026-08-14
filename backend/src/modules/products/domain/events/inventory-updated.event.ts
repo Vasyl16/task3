@@ -20,6 +20,12 @@ export type InventoryUpdateReason =
   | 'CHECKOUT'
   | 'SHIPMENT'
   | 'CANCELLATION'
+  // An admin force-cancelling an order that already SHIPPED/COMPLETED.
+  // Distinct from CANCELLATION: by this point the hold had already been
+  // consumed (see SHIPMENT), so there is no reservation left to release
+  // — the units genuinely left the shelf and this puts them back on it,
+  // the same as a return.
+  | 'RETURN'
   | 'SELLER_ADJUSTMENT'
   | 'AUCTION_HOLD'
   | 'AUCTION_RELEASE';

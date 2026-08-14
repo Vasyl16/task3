@@ -148,6 +148,7 @@ describe('OrdersService', () => {
       | 'reserveStockForCheckout'
       | 'commitReservationForShipment'
       | 'releaseReservationForCancellation'
+      | 'returnStockAfterForceCancellation'
       | 'releaseAuctionReservation'
     >
   >;
@@ -191,6 +192,7 @@ describe('OrdersService', () => {
       reserveStockForCheckout: jest.fn(),
       commitReservationForShipment: jest.fn().mockResolvedValue(true),
       releaseReservationForCancellation: jest.fn(),
+      returnStockAfterForceCancellation: jest.fn(),
       releaseAuctionReservation: jest.fn(),
     };
     outboxService = { record: jest.fn() };
@@ -728,6 +730,76 @@ describe('OrdersService', () => {
         productsService.commitReservationForShipment,
       ).not.toHaveBeenCalled();
     });
+
+    // The whole point of the admin override: a dispute ruling has to be
+    // enactable even after the seller has already shipped. Ordinarily
+    // SHIPPED -> CANCELLED is not a valid transition at all.
+    it.each([SellerOrderStatus.SHIPPED, SellerOrderStatus.COMPLETED])(
+      'lets an ADMIN force-cancel a %s order, restocking rather than releasing',
+      async (fromStatus) => {
+        ordersRepository.findSellerOrderById.mockResolvedValue(
+          buildSellerOrder({
+            sellerId: 'some-sellers-profile',
+            status: fromStatus,
+          }),
+        );
+        ordersRepository.updateSellerOrderStatus.mockResolvedValue(
+          buildSellerOrder({ status: SellerOrderStatus.CANCELLED }),
+        );
+        ordersRepository.findOrderItemsForSellerOrder.mockResolvedValue([
+          { productId: 'product-1', quantity: 2 } as never,
+        ]);
+        ordersRepository.findSellerOrderStatusesForOrder.mockResolvedValue([
+          SellerOrderStatus.CANCELLED,
+        ]);
+
+        await ordersService.updateSellerOrderStatus(
+          'so-1',
+          buildCaller({ id: 'admin-1', role: UserRole.ADMIN }),
+          { status: SellerOrderStatus.CANCELLED },
+        );
+
+        // The units already left quantityReserved at SHIPMENT — this is
+        // a genuine restock, not a release of a hold that no longer
+        // exists.
+        expect(
+          productsService.returnStockAfterForceCancellation,
+        ).toHaveBeenCalledWith(fakeTx, 'product-1', 2);
+        expect(
+          productsService.releaseReservationForCancellation,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    // The seller does NOT get this override — only an admin can cancel a
+    // shipment that already went out, which is what makes it possible
+    // for a dispute ruling to actually be enacted rather than merely
+    // recorded.
+    it.each([SellerOrderStatus.SHIPPED, SellerOrderStatus.COMPLETED])(
+      'still refuses a SELLER cancelling their own %s order',
+      async (fromStatus) => {
+        ordersRepository.findSellerOrderById.mockResolvedValue(
+          buildSellerOrder({ sellerId: 'my-profile', status: fromStatus }),
+        );
+        sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue(
+          buildSellerProfile({ id: 'my-profile' }),
+        );
+
+        await expect(
+          ordersService.updateSellerOrderStatus(
+            'so-1',
+            buildCaller({ id: 'seller-user' }),
+            { status: SellerOrderStatus.CANCELLED },
+          ),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(
+          productsService.returnStockAfterForceCancellation,
+        ).not.toHaveBeenCalled();
+        expect(
+          productsService.releaseReservationForCancellation,
+        ).not.toHaveBeenCalled();
+      },
+    );
 
     it('allows a valid transition (NEW -> PROCESSING) by the owning seller', async () => {
       ordersRepository.findSellerOrderById.mockResolvedValue(

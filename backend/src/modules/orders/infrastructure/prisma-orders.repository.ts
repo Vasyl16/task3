@@ -57,19 +57,61 @@ export class PrismaOrdersRepository implements OrdersRepository {
     });
   }
 
-  findAllForAdmin(filter: {
+  // Search spans the three things an admin actually has to hand: the
+  // order id (from a dispute or a support ticket), the buyer, and the
+  // product that went wrong. Applied in SQL alongside the page — never
+  // to an already-selected page, which would search only the rows that
+  // happened to land on it.
+  async findAllForAdmin(filter: {
     status?: OrderStatus;
     buyerId?: string;
-  }): Promise<OrderWithSellerOrderItems[]> {
-    return this.prisma.order.findMany({
-      where: { status: filter.status, buyerId: filter.buyerId },
-      include: {
-        sellerOrders: {
-          include: { items: { include: { product: PRODUCT_CARD } } },
+    search?: string;
+    skip?: number;
+    take?: number;
+  }): Promise<{ items: OrderWithSellerOrderItems[]; total: number }> {
+    const search = filter.search?.trim();
+    const where: Prisma.OrderWhereInput = {
+      status: filter.status,
+      buyerId: filter.buyerId,
+      ...(search
+        ? {
+            OR: [
+              { id: { contains: search, mode: 'insensitive' } },
+              { buyer: { email: { contains: search, mode: 'insensitive' } } },
+              { buyer: { name: { contains: search, mode: 'insensitive' } } },
+              {
+                sellerOrders: {
+                  some: {
+                    items: {
+                      some: {
+                        product: {
+                          name: { contains: search, mode: 'insensitive' },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            ],
+          }
+        : {}),
+    };
+
+    const [items, total] = await Promise.all([
+      this.prisma.order.findMany({
+        where,
+        include: {
+          sellerOrders: {
+            include: { items: { include: { product: PRODUCT_CARD } } },
+          },
         },
-      },
-      orderBy: { placedAt: 'desc' },
-    });
+        orderBy: { placedAt: 'desc' },
+        skip: filter.skip,
+        take: filter.take,
+      }),
+      this.prisma.order.count({ where }),
+    ]);
+    return { items, total };
   }
 
   findSellerOrderById(id: string): Promise<SellerOrder | null> {
