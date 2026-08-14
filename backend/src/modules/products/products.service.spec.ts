@@ -13,6 +13,7 @@ import type { AuthenticatedUser } from '../../core/auth/authenticated-user.inter
 import { CorrelationIdService } from '../../core/correlation-id/correlation-id.service';
 import { OutboxService } from '../../infrastructure/outbox/outbox.service';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service';
+import { CacheService } from '../../infrastructure/cache/cache.service';
 import { CategoriesService } from '../categories/categories.service';
 import { SellersService } from '../sellers/sellers.service';
 import { ProductsRepository } from './domain/products.repository';
@@ -95,6 +96,9 @@ describe('ProductsService', () => {
   let categoriesService: jest.Mocked<Pick<CategoriesService, 'findById'>>;
   let outboxService: jest.Mocked<Pick<OutboxService, 'record'>>;
   let correlationIdService: jest.Mocked<Pick<CorrelationIdService, 'getId'>>;
+  let cacheService: jest.Mocked<
+    Pick<CacheService, 'get' | 'set' | 'del' | 'getVersion' | 'bumpVersion'>
+  >;
   // The fake transaction client passed to callbacks below — asserting
   // against this same object below is how the tests confirm the
   // repository write and the outbox event were recorded through the
@@ -127,6 +131,16 @@ describe('ProductsService', () => {
     };
     outboxService = { record: jest.fn() };
     correlationIdService = { getId: jest.fn().mockReturnValue('corr-1') };
+    // Defaults to "always a cache miss, writes are no-ops" — every
+    // existing test below exercises the repository as if there were no
+    // cache at all, unless a cache-specific test overrides these.
+    cacheService = {
+      get: jest.fn().mockResolvedValue(undefined),
+      set: jest.fn().mockResolvedValue(undefined),
+      del: jest.fn().mockResolvedValue(undefined),
+      getVersion: jest.fn().mockResolvedValue(0),
+      bumpVersion: jest.fn().mockResolvedValue(undefined),
+    };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -136,6 +150,7 @@ describe('ProductsService', () => {
         { provide: CategoriesService, useValue: categoriesService },
         { provide: OutboxService, useValue: outboxService },
         { provide: CorrelationIdService, useValue: correlationIdService },
+        { provide: CacheService, useValue: cacheService },
         {
           // The catalogue projections enrich each product with its
           // rating; these tests are about ownership and outbox writes,
@@ -768,6 +783,113 @@ describe('ProductsService', () => {
         'moderationNote',
         'Counterfeit — reported by three buyers',
       );
+    });
+  });
+
+  // Redis caching of the catalog + hot product-detail reads. A cache hit
+  // must skip Postgres entirely; a write that changes what a catalogue
+  // read returns must invalidate what it cached.
+  describe('catalog/product-detail caching', () => {
+    it('findByIdForCatalog returns a cache hit without touching the repository', async () => {
+      cacheService.get.mockResolvedValue({
+        id: 'product-1',
+        name: 'Cached Widget',
+      });
+
+      const product = await productsService.findByIdForCatalog('product-1');
+
+      expect(product).toEqual({ id: 'product-1', name: 'Cached Widget' });
+      expect(productsRepository.findById).not.toHaveBeenCalled();
+    });
+
+    it('findByIdForCatalog writes through to the cache on a miss', async () => {
+      productsRepository.findById.mockResolvedValue(buildProduct());
+
+      await productsService.findByIdForCatalog('product-1');
+
+      expect(cacheService.set).toHaveBeenCalledWith(
+        'cache:product:product-1',
+        expect.objectContaining({ id: 'product-1' }),
+        expect.any(Number),
+      );
+    });
+
+    it('findAllForCatalog returns a cache hit without touching the repository', async () => {
+      cacheService.get.mockResolvedValue([{ id: 'product-1' }]);
+
+      const products = await productsService.findAllForCatalog();
+
+      expect(products).toEqual([{ id: 'product-1' }]);
+      expect(productsRepository.findAll).not.toHaveBeenCalled();
+    });
+
+    it('findAllForCatalog writes through to the cache on a miss, keyed by the current version', async () => {
+      cacheService.getVersion.mockResolvedValue(2);
+      productsRepository.findAll.mockResolvedValue([buildProduct()]);
+
+      await productsService.findAllForCatalog({ categoryId: 'cat-1' });
+
+      const [key] = cacheService.set.mock.calls[0];
+      expect(key).toContain('v2');
+      expect(key).toContain('cat-1');
+    });
+
+    // The core invalidation guarantee: a write that changes what a read
+    // would return must not leave a stale cached copy behind.
+    it('update() deletes the product’s cached detail and bumps the catalog version', async () => {
+      productsRepository.findById.mockResolvedValue(
+        buildProduct({ sellerId: 'my-profile' }),
+      );
+      sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue(
+        buildSellerProfile({ id: 'my-profile' }),
+      );
+      productsRepository.update.mockResolvedValue(buildProduct());
+
+      await productsService.update('product-1', buildCaller(), {
+        name: 'Renamed Widget',
+      });
+
+      expect(cacheService.del).toHaveBeenCalledWith('cache:product:product-1');
+      expect(cacheService.bumpVersion).toHaveBeenCalledWith('cache:catalog');
+    });
+
+    it('archive() deletes the product’s cached detail and bumps the catalog version', async () => {
+      productsRepository.findById.mockResolvedValue(
+        buildProduct({ sellerId: 'my-profile' }),
+      );
+      sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue(
+        buildSellerProfile({ id: 'my-profile' }),
+      );
+      productsRepository.archive.mockResolvedValue(
+        buildProduct({ status: ProductStatus.ARCHIVED }),
+      );
+
+      await productsService.archive('product-1', buildCaller());
+
+      expect(cacheService.del).toHaveBeenCalledWith('cache:product:product-1');
+      expect(cacheService.bumpVersion).toHaveBeenCalledWith('cache:catalog');
+    });
+
+    it('create() bumps the catalog version so new listings appear in cached pages', async () => {
+      sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue(
+        buildSellerProfile({ id: 'my-profile' }),
+      );
+      categoriesService.findById.mockResolvedValue({
+        id: 'category-1',
+      } as never);
+      productsRepository.createWithInventory.mockResolvedValue(
+        buildProduct({ sellerId: 'my-profile' }),
+      );
+
+      await productsService.create('user-1', {
+        categoryId: 'category-1',
+        name: 'Widget',
+        slug: 'widget',
+        basePrice: 9.99,
+        initialQuantity: 5,
+      });
+
+      expect(cacheService.bumpVersion).toHaveBeenCalledWith('cache:catalog');
     });
   });
 

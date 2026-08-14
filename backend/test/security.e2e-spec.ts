@@ -25,8 +25,8 @@ import {
 // The four regression blocks at the bottom cover holes that were live in
 // this codebase and are reproduced here exactly as they were exploited:
 // an unrelated account reading a seller's ledger, reading a stranger's
-// refund, forging requestedById, reading another user's notification
-// through markRead, and the public catalog serving the moderation trail.
+// refund, reading another user's notification through markRead, and the
+// public catalog serving the moderation trail.
 describe('Cross-tenant authorization (e2e, real database)', () => {
   let app: INestApplication<App>;
   let prisma: PrismaService;
@@ -526,46 +526,19 @@ describe('Cross-tenant authorization (e2e, real database)', () => {
     });
   });
 
-  describe('regression: refunds were readable and forgeable by anyone', () => {
+  describe('regression: refunds were readable by anyone', () => {
     let refundId: string;
 
     beforeAll(async () => {
-      const res = await http()
-        .post('/refunds')
-        .set(...as(customer))
-        .send({ sellerOrderId: sellerOrderB.id, amount: 10, reason: 'damaged' })
-        .expect(201);
-      refundId = (res.body as { id: string }).id;
-    });
-
-    it('attributes the refund to the caller, not to whoever they name', async () => {
-      const refund = await prisma.refund.findUniqueOrThrow({
-        where: { id: refundId },
+      // There is no client-facing "request a refund" endpoint — a Refund
+      // only ever exists because the cancellation saga opened one (see
+      // PaymentsLedgerService's "Refund saga" section). Seeded directly
+      // via Prisma here, the same shape createSystemRefund produces, to
+      // exercise the READ-authorization rule this block is actually about.
+      const refund = await prisma.refund.create({
+        data: { sellerOrderId: sellerOrderB.id, amount: 10, reason: 'damaged' },
       });
-      expect(refund.requestedById).toBe(customer.id);
-    });
-
-    it('rejects a body carrying requestedById at all', async () => {
-      const res = await http()
-        .post('/refunds')
-        .set(...as(stranger))
-        .send({
-          sellerOrderId: sellerOrderB.id,
-          amount: 9999,
-          requestedById: customer.id,
-        })
-        .expect(400);
-      expect(JSON.stringify(res.body)).toContain(
-        'requestedById should not exist',
-      );
-    });
-
-    it('refuses a refund on a SellerOrder the caller did not buy', async () => {
-      await http()
-        .post('/refunds')
-        .set(...as(stranger))
-        .send({ sellerOrderId: sellerOrderB.id, amount: 9999 })
-        .expect(404);
+      refundId = refund.id;
     });
 
     it('refuses an unrelated account reading the refund', async () => {
@@ -592,14 +565,6 @@ describe('Cross-tenant authorization (e2e, real database)', () => {
         .get(`/refunds/${refundId}`)
         .set(...as(sellerB))
         .expect(200);
-    });
-
-    it('refuses a non-admin resolving a refund', async () => {
-      await http()
-        .patch(`/refunds/${refundId}/resolve`)
-        .set(...as(sellerB))
-        .send({ status: 'PROCESSED' })
-        .expect(403);
     });
   });
 

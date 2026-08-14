@@ -18,6 +18,7 @@ import type { AuthenticatedUser } from '../../core/auth/authenticated-user.inter
 import { CorrelationIdService } from '../../core/correlation-id/correlation-id.service';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service';
 import { OutboxService } from '../../infrastructure/outbox/outbox.service';
+import { CacheService } from '../../infrastructure/cache/cache.service';
 import { ReviewsService } from '../reviews/reviews.service';
 import { toPageParams, type Paginated } from '../../core/pagination';
 import { ListOwnProductsQuery } from './dto/list-own-products.query';
@@ -62,6 +63,21 @@ export type CatalogProduct = Omit<
 export const PRODUCT_SORTS = ['newest', 'rating'] as const;
 export type ProductSort = (typeof PRODUCT_SORTS)[number];
 
+// A short TTL, not a long one: this cache exists to absorb request
+// volume on hot reads, not to be a second source of truth. Anything
+// inside it (price, description, and yes — quantityAvailable, via the
+// checkout/bidding paths, which never read through here) can be briefly
+// stale for up to this long; the realtime layer corrects an active
+// viewer's stock/bid figures independently of this cache entirely (see
+// .claude/rules/backend.md — same posture as Meilisearch).
+const CATALOG_CACHE_NAMESPACE = 'cache:catalog';
+const CATALOG_CACHE_TTL_SECONDS = 30;
+const PRODUCT_DETAIL_TTL_SECONDS = 30;
+
+function productDetailCacheKey(id: string): string {
+  return `cache:product:${id}`;
+}
+
 // Built by listing what IS public rather than deleting what isn't. The
 // difference matters: a sensitive column added to Product later is
 // excluded from this response by default and has to be opted in
@@ -104,6 +120,7 @@ export class ProductsService {
     // read/write still goes through ProductsRepository, keeping Prisma
     // details out of the rest of the service.
     private readonly prisma: PrismaService,
+    private readonly cache: CacheService,
   ) {}
 
   // Internal lookups — the full row, including the moderation audit
@@ -137,6 +154,13 @@ export class ProductsService {
     sellerId?: string;
     sort?: ProductSort;
   }): Promise<CatalogProduct[]> {
+    const version = await this.cache.getVersion(CATALOG_CACHE_NAMESPACE);
+    const cacheKey = `${CATALOG_CACHE_NAMESPACE}:v${version}:${filter?.categoryId ?? '-'}:${filter?.sellerId ?? '-'}:${filter?.sort ?? '-'}`;
+    const cached = await this.cache.get<CatalogProduct[]>(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
     const products = await this.findAll(filter);
     const ratings = await this.reviewsService.getRatingsFor(
       products.map((p) => p.id),
@@ -163,13 +187,37 @@ export class ProductsService {
       );
     }
 
+    await this.cache.set(cacheKey, catalog, CATALOG_CACHE_TTL_SECONDS);
     return catalog;
   }
 
   async findByIdForCatalog(id: string): Promise<CatalogProduct> {
+    const cacheKey = productDetailCacheKey(id);
+    const cached = await this.cache.get<CatalogProduct>(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
     const product = await this.findById(id);
     const rating = await this.reviewsService.getRatingFor(id);
-    return toCatalogProduct(product, rating);
+    const catalogProduct = toCatalogProduct(product, rating);
+    await this.cache.set(cacheKey, catalogProduct, PRODUCT_DETAIL_TTL_SECONDS);
+    return catalogProduct;
+  }
+
+  // Every write that changes what a catalogue read would return —
+  // create, update, archive, restore, moderate, or a new image — calls
+  // this. The per-product detail key is deleted outright (no reason to
+  // wait out its TTL when we know exactly what changed); every cached
+  // catalogue LISTING is invalidated at once by bumping the namespace
+  // version, since a single product write can affect arbitrarily many
+  // cached filter/sort combinations and there is no cheap way to name
+  // them all individually.
+  private async invalidateCatalogCache(productId: string): Promise<void> {
+    await Promise.all([
+      this.cache.del(productDetailCacheKey(productId)),
+      this.cache.bumpVersion(CATALOG_CACHE_NAMESPACE),
+    ]);
   }
 
   // Reference implementation of the strong-consistency + outbox pattern:
@@ -189,7 +237,7 @@ export class ProductsService {
     const correlationId = this.correlationIdService.getId() ?? randomUUID();
 
     try {
-      return await this.prisma.$transaction(async (tx) => {
+      const created = await this.prisma.$transaction(async (tx) => {
         const product = await this.productsRepository.createWithInventory(tx, {
           ...dto,
           type: dto.type ?? ProductType.FIXED_PRICE,
@@ -209,6 +257,11 @@ export class ProductsService {
         });
         return product;
       });
+      // A new listing changes every cached catalogue page it would now
+      // appear on — bump the version. No per-product detail key exists
+      // for a brand-new id yet, so nothing to delete there.
+      await this.cache.bumpVersion(CATALOG_CACHE_NAMESPACE);
+      return created;
     } catch (err) {
       // Product.slug is globally unique (it's the public URL), so one
       // seller's slug can collide with a product they can't even see.
@@ -241,7 +294,7 @@ export class ProductsService {
 
     const { quantityAvailable, ...productFields } = dto;
     const correlationId = this.correlationIdService.getId() ?? randomUUID();
-    return this.prisma.$transaction(async (tx) => {
+    const updated = await this.prisma.$transaction(async (tx) => {
       const updated = await this.productsRepository.update(
         tx,
         id,
@@ -271,6 +324,8 @@ export class ProductsService {
       });
       return updated;
     });
+    await this.invalidateCatalogCache(id);
+    return updated;
   }
 
   // The file itself is already written to disk by the time this runs
@@ -288,7 +343,7 @@ export class ProductsService {
     await this.assertOwnsProductOrIsAdmin(product, caller);
 
     const correlationId = this.correlationIdService.getId() ?? randomUUID();
-    return this.prisma.$transaction(async (tx) => {
+    const updated = await this.prisma.$transaction(async (tx) => {
       const updated = await this.productsRepository.update(tx, id, {
         imageUrl,
       });
@@ -301,6 +356,8 @@ export class ProductsService {
       });
       return updated;
     });
+    await this.invalidateCatalogCache(id);
+    return updated;
   }
 
   // Soft delete only (sets status ARCHIVED) — see
@@ -315,7 +372,7 @@ export class ProductsService {
     await this.assertOwnsProductOrIsAdmin(product, caller);
 
     const correlationId = this.correlationIdService.getId() ?? randomUUID();
-    return this.prisma.$transaction(async (tx) => {
+    const archived = await this.prisma.$transaction(async (tx) => {
       const archived = await this.productsRepository.archive(tx, id);
       await this.outboxService.record(tx, {
         aggregateType: 'Product',
@@ -326,6 +383,8 @@ export class ProductsService {
       });
       return archived;
     });
+    await this.invalidateCatalogCache(id);
+    return archived;
   }
 
   // A seller's OWN catalogue, including ARCHIVED. The public listing
@@ -371,7 +430,7 @@ export class ProductsService {
     }
 
     const correlationId = this.correlationIdService.getId() ?? randomUUID();
-    return this.prisma.$transaction(async (tx) => {
+    const restored = await this.prisma.$transaction(async (tx) => {
       const restored = await this.productsRepository.restore(tx, id);
       await this.outboxService.record(tx, {
         aggregateType: 'Product',
@@ -382,6 +441,8 @@ export class ProductsService {
       });
       return restored;
     });
+    await this.invalidateCatalogCache(id);
+    return restored;
   }
 
   // ===================== Moderation (admin) =====================
@@ -452,6 +513,7 @@ export class ProductsService {
       });
       return updated;
     });
+    await this.invalidateCatalogCache(id);
 
     this.logger.warn({
       event: 'product.moderated',

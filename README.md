@@ -73,10 +73,13 @@ for a specific reason:
   Meilisearch index sync and WebSocket notification dispatch, both
   triggered via the transactional outbox pattern (domain write + outbox
   row commit together in Postgres; a relay then enqueues BullMQ jobs from
-  outbox rows). Redis holds no business-critical state — if it's flushed,
-  in-flight async jobs are lost but Postgres remains fully correct;
-  jobs would need to be re-triggered by re-running the outbox relay, not
-  by any manual data recovery.
+  outbox rows). It also backs a small **read-through cache** for the
+  product catalogue and product-detail pages (`infrastructure/cache/`).
+  Redis holds no business-critical state either way — if it's flushed,
+  in-flight async jobs are lost but Postgres remains fully correct
+  (jobs would need to be re-triggered by re-running the outbox relay,
+  not by any manual data recovery), and the cache just goes cold, with
+  every read falling straight through to Postgres until it warms back up.
 - **Meilisearch** — the search/read index for products. It is **not** a
   source of truth: nothing in the application may depend on Meilisearch
   being up-to-date, or even up, for anything other than the search feature
@@ -622,7 +625,27 @@ Disputes are their own module: a buyer raises one against a `SellerOrder`
 they actually bought (verified through `OrdersService`, 404 rather than
 403 so the endpoint can't be used to probe ids), only one may be awaiting
 a decision per order at a time, and an admin ruling is final and must
-carry written reasoning.
+carry written reasoning. The seller whose shipment it concerns can also
+read the dispute, see the purchase it's about, and reply — the same
+three-way access check (buyer who raised it, the owning seller, or any
+admin) covers reads, the comment thread, and posting.
+
+**Resolving a dispute and acting on the order are two separate, deliberate
+admin actions, not one atomic operation.** `DisputesService.resolve()`
+only ever changes the `Dispute` row (status, resolution text, who
+decided). If the ruling calls for it, the admin separately cancels the
+`SellerOrder` from the orders queue — including one already `SHIPPED` or
+`COMPLETED`, an override only ADMIN has (`canAdminForceCancel` in
+`orders/domain/order-status-transitions.ts`), which is what actually
+triggers a refund (see below). This mirrors how the ruling is meant to
+happen: read the dispute, look at the order, decide what to do with the
+order, then close the case — not a single button that guesses the right
+order action from a status enum. The trade-off: nothing enforces the
+correspondence between the two, so a dispute can be marked `RESOLVED` in
+the buyer's favor without an admin having actually cancelled anything.
+Acceptable for this project's scope; a production version would want an
+audit link between a resolved dispute and whatever order action (if any)
+accompanied it.
 
 `GET /admin/analytics` returns the whole dashboard in one response —
 commission revenue, seller revenue, order counts, cart→order conversion,
@@ -677,7 +700,33 @@ implementation at bootstrap, with the tokens themselves in
 `shared/lib/token-storage` because they are two strings that know nothing
 about sessions.
 
-Refund resolution (`PaymentsLedgerService.resolveRefund`) remains
-intentionally stubbed (`NotImplementedException`) pending its own task.
-Analytics is also the one BullMQ queue with no consumer yet — nothing in
-the reporting path is async.
+**There is no client-facing "request a refund" endpoint.** An earlier
+version had `POST /refunds` and `PATCH /refunds/:id/resolve`, but the
+latter unconditionally returned 501 — a customer could open a refund
+request that then had no way to ever resolve, even for an admin. Both
+were removed rather than left as a dead end. A `Refund` now only ever
+exists because `PaymentsLedgerService`'s cancellation saga opened one:
+getting money back means getting the underlying `SellerOrder` cancelled
+— by the seller pre-shipment, or by an admin acting on a dispute ruling
+afterwards (see above) — which is what the saga listens for. `GET
+/refunds/:id` still exists, to let the buyer, the fulfilling seller, or
+an admin check a refund's status once the saga has opened one.
+
+Analytics is the one BullMQ queue with no consumer yet — nothing in the
+reporting path is async.
+
+**Redis caches the product catalogue and individual product pages**
+(`infrastructure/cache/`), read-through with a 30s TTL. Same posture as
+Meilisearch and the realtime layer: never authoritative — checkout,
+bidding, and stock reservation always read Postgres directly inside
+their own transaction, never through this cache — and every cache
+method fails open (a Redis error is logged and treated as a miss/no-op),
+so an outage degrades browsing to "slower", never "wrong" or "down".
+Catalogue listings are invalidated by a versioned namespace key (bumped
+on every product write), which orphans every previously cached filter/
+sort combination in one INCR instead of a Redis KEYS/SCAN sweep; a
+product's detail page is invalidated directly by id on the same writes.
+The trade-off this accepts: `quantityAvailable` on a cached read can be
+briefly stale (up to the TTL) — acceptable because checkout re-validates
+stock authoritatively regardless of what any cache says, and an active
+viewer's figure is corrected independently by the WebSocket layer.

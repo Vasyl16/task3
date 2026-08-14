@@ -2,7 +2,6 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
-  NotImplementedException,
 } from '@nestjs/common';
 import {
   RefundStatus,
@@ -21,8 +20,6 @@ import { SellersService } from '../sellers/sellers.service';
 import { PaymentsLedgerRepository } from './domain/payments-ledger.repository';
 import { REFUND_PROCESSED_EVENT } from './domain/events/refund-processed.event';
 import { REFUND_FAILED_EVENT } from './domain/events/refund-failed.event';
-import { RequestRefundDto } from './dto/request-refund.dto';
-import { ResolveRefundDto } from './dto/resolve-refund.dto';
 
 @Injectable()
 export class PaymentsLedgerService {
@@ -53,22 +50,6 @@ export class PaymentsLedgerService {
       }
     }
     return this.paymentsLedgerRepository.listLedgerForSeller(sellerId);
-  }
-
-  // Only the buyer who actually placed the order may ask for their money
-  // back (ADMIN may act on their behalf) — findSellerOrderAsBuyer 404s
-  // for anyone else. requestedById comes from the token, never the body.
-  async requestRefund(
-    caller: AuthenticatedUser,
-    dto: RequestRefundDto,
-  ): Promise<Refund> {
-    await this.ordersService.findSellerOrderAsBuyer(dto.sellerOrderId, caller);
-    return this.paymentsLedgerRepository.createRefundRequest({
-      sellerOrderId: dto.sellerOrderId,
-      requestedById: caller.id,
-      amount: dto.amount,
-      reason: dto.reason,
-    });
   }
 
   // Internal lookup — no authorization. Every client-facing path goes
@@ -114,21 +95,13 @@ export class PaymentsLedgerService {
     return refund;
   }
 
-  // Approving/processing a refund must reverse the sale in the ledger
-  // (LedgerEntryType.REFUND), possibly trigger a real payment-gateway
-  // refund, and update SellerOrder.status — atomically. Deliberately not
-  // implemented here. ADMIN-only (see the controller); resolvedById will
-  // come from `caller`, never a body field.
-  async resolveRefund(
-    id: string,
-    _caller: AuthenticatedUser,
-    _dto: ResolveRefundDto,
-  ): Promise<Refund> {
-    await this.findRefundById(id); // 404s if missing
-    throw new NotImplementedException('PaymentsLedgerService.resolveRefund');
-  }
-
   // ===================== Refund saga =====================
+  // There is no client-facing "request a refund" or "resolve a refund"
+  // endpoint — a Refund only ever exists because this saga opened one.
+  // Getting money back means getting the underlying SellerOrder
+  // cancelled (by the seller pre-shipment, or by an ADMIN acting on a
+  // dispute ruling post-shipment — see OrdersService.updateSellerOrderStatus
+  // and DisputesService.resolve); cancellation is what triggers this.
   // Driven by RefundConsumer off a SellerOrderStatusChanged(CANCELLED)
   // event. Split into three separately-committed steps on purpose — the
   // gateway call in between them CANNOT be inside a transaction, so each

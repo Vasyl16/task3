@@ -23,15 +23,6 @@ export class PrismaPaymentsLedgerRepository implements PaymentsLedgerRepository 
     return this.prisma.refund.findUnique({ where: { id } });
   }
 
-  createRefundRequest(data: {
-    sellerOrderId: string;
-    requestedById: string;
-    amount: number;
-    reason?: string;
-  }): Promise<Refund> {
-    return this.prisma.refund.create({ data });
-  }
-
   createSystemRefund(
     tx: Prisma.TransactionClient,
     data: { sellerOrderId: string; amount: number; reason: string },

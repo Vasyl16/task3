@@ -8,9 +8,7 @@ import { PaymentsLedgerService } from './payments-ledger.service';
 
 // Every case here is a regression test for a real hole: this controller
 // shipped with NO authorization at all, so any authenticated account
-// could read any seller's revenue ledger, read any refund, and open a
-// refund on someone else's order attributed to a third party. The DTO
-// even accepted a client-supplied requestedById.
+// could read any seller's revenue ledger and read any refund.
 describe('PaymentsLedgerService (authorization)', () => {
   const OWN_SELLER_ID = 'seller-own';
   const OTHER_SELLER_ID = 'seller-other';
@@ -32,10 +30,7 @@ describe('PaymentsLedgerService (authorization)', () => {
   };
 
   let repository: jest.Mocked<
-    Pick<
-      PaymentsLedgerRepository,
-      'listLedgerForSeller' | 'findRefundById' | 'createRefundRequest'
-    >
+    Pick<PaymentsLedgerRepository, 'listLedgerForSeller' | 'findRefundById'>
   >;
   let sellersService: jest.Mocked<
     Pick<SellersService, 'findById' | 'findByUserId'> & {
@@ -53,7 +48,6 @@ describe('PaymentsLedgerService (authorization)', () => {
       findRefundById: jest
         .fn()
         .mockResolvedValue({ id: 'refund-1', sellerOrderId: 'so-1' }),
-      createRefundRequest: jest.fn().mockResolvedValue({ id: 'refund-new' }),
     };
     sellersService = {
       findById: jest.fn().mockResolvedValue({ id: OWN_SELLER_ID }),
@@ -111,34 +105,6 @@ describe('PaymentsLedgerService (authorization)', () => {
       expect(
         sellersService.getOwnApprovedSellerProfileOrThrow,
       ).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('requestRefund', () => {
-    // The mass-assignment fix: requestedById is the token's subject, and
-    // RequestRefundDto no longer has the field at all (a body carrying
-    // one is now rejected outright by forbidNonWhitelisted).
-    it('attributes the refund to the authenticated caller', async () => {
-      await service.requestRefund(customer, {
-        sellerOrderId: 'so-1',
-        amount: 40,
-      });
-      expect(repository.createRefundRequest).toHaveBeenCalledWith({
-        sellerOrderId: 'so-1',
-        requestedById: customer.id,
-        amount: 40,
-        reason: undefined,
-      });
-    });
-
-    it('refuses a refund on a SellerOrder the caller did not buy', async () => {
-      ordersService.findSellerOrderAsBuyer.mockRejectedValue(
-        new NotFoundException('SellerOrder so-1 not found'),
-      );
-      await expect(
-        service.requestRefund(customer, { sellerOrderId: 'so-1', amount: 40 }),
-      ).rejects.toBeInstanceOf(NotFoundException);
-      expect(repository.createRefundRequest).not.toHaveBeenCalled();
     });
   });
 
