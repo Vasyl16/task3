@@ -14,6 +14,8 @@ import { CurrentUser } from '../../core/auth/decorators/current-user.decorator';
 import { Roles } from '../../core/auth/decorators/roles.decorator';
 import type { AuthenticatedUser } from '../../core/auth/authenticated-user.interface';
 import { AnalyticsService } from '../analytics/analytics.service';
+import { OrdersService } from '../orders/orders.service';
+import { ListOrdersQuery } from '../orders/dto/list-orders.query';
 import { AnalyticsPeriodQuery } from '../analytics/dto/analytics-period.query';
 import { ExportQuery } from '../analytics/dto/export.query';
 import { DisputesService } from '../disputes/disputes.service';
@@ -49,6 +51,7 @@ export class AdminController {
     private readonly productsService: ProductsService,
     private readonly disputesService: DisputesService,
     private readonly analyticsService: AnalyticsService,
+    private readonly ordersService: OrdersService,
   ) {}
 
   // ===================== Seller application moderation ==============
@@ -111,6 +114,26 @@ export class AdminController {
     @Body() dto: ModerateProductDto,
   ) {
     return this.productsService.moderate(id, user, dto);
+  }
+
+  // ===================== Orders =====================================
+  // Reading and acting on a single order is NOT duplicated here: both
+  // GET /orders/:id and PATCH /orders/seller-orders/:id/status already
+  // admit an ADMIN caller and enforce the same transition rules a seller
+  // is held to. Only the queue — every order, which no buyer-facing
+  // route may ever return — needs an admin-only endpoint.
+  @Get('orders')
+  @ApiOperation({
+    summary: 'All orders (admin queue)',
+    description:
+      'Includes line items, so a dispute can be traced to the product it ' +
+      'is about. To act on one, use PATCH /orders/seller-orders/:id/status ' +
+      '— an admin may cancel a shipment the same way its seller would, ' +
+      'and the same transitions apply (a SHIPPED order can no longer be ' +
+      'cancelled).',
+  })
+  listOrders(@Query() query: ListOrdersQuery) {
+    return this.ordersService.listForAdmin(query);
   }
 
   // ===================== Disputes ===================================

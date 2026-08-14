@@ -5,17 +5,24 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { UserRole, type Dispute } from '@prisma/client';
+import {
+  DisputeStatus,
+  UserRole,
+  type Dispute,
+  type DisputeComment,
+} from '@prisma/client';
 import type { AuthenticatedUser } from '../../core/auth/authenticated-user.interface';
 import { OrdersService } from '../orders/orders.service';
 import {
   DisputeListFilter,
   DisputesRepository,
+  type DisputeWithOrderContext,
 } from './domain/disputes.repository';
 import {
   isValidDisputeTransition,
   requiresResolutionText,
 } from './domain/dispute-transitions';
+import { AddDisputeCommentDto } from './dto/add-dispute-comment.dto';
 import { CreateDisputeDto } from './dto/create-dispute.dto';
 import { ResolveDisputeDto } from './dto/resolve-dispute.dto';
 
@@ -39,17 +46,39 @@ export class DisputesService {
   ): Promise<Dispute> {
     await this.ordersService.findSellerOrderAsBuyer(dto.sellerOrderId, caller);
 
-    const active = await this.disputesRepository.findActiveForSellerOrder(
-      dto.sellerOrderId,
-    );
+    // A line-scoped dispute must be about a line of THIS order. Checked
+    // rather than trusted: the buyer owns the order, but that says
+    // nothing about an orderItemId they typed into the request, which
+    // could belong to somebody else's purchase entirely.
+    if (dto.orderItemId) {
+      const item = await this.disputesRepository.findOrderItemInSellerOrder(
+        dto.sellerOrderId,
+        dto.orderItemId,
+      );
+      if (!item) {
+        throw new NotFoundException(
+          `Order item ${dto.orderItemId} not found on this order`,
+        );
+      }
+    }
+
+    // Scoped to the line when there is one, so a buyer can dispute a
+    // damaged item and a missing item on the same order independently.
+    const active = await this.disputesRepository.findActiveFor({
+      sellerOrderId: dto.sellerOrderId,
+      orderItemId: dto.orderItemId,
+    });
     if (active) {
       throw new ConflictException(
-        'This order already has a dispute awaiting a decision',
+        dto.orderItemId
+          ? 'This item already has a dispute awaiting a decision'
+          : 'This order already has a dispute awaiting a decision',
       );
     }
 
     const dispute = await this.disputesRepository.create({
       sellerOrderId: dto.sellerOrderId,
+      orderItemId: dto.orderItemId,
       raisedById: caller.id,
       reason: dto.reason,
     });
@@ -59,6 +88,7 @@ export class DisputesService {
       entityType: 'Dispute',
       entityId: dispute.id,
       sellerOrderId: dispute.sellerOrderId,
+      orderItemId: dispute.orderItemId,
     });
     return dispute;
   }
@@ -80,6 +110,25 @@ export class DisputesService {
   ): Promise<Dispute> {
     const dispute = await this.findById(id);
     if (caller.role !== UserRole.ADMIN && dispute.raisedById !== caller.id) {
+      throw new NotFoundException(`Dispute ${id} not found`);
+    }
+    return dispute;
+  }
+
+  // The same access rule as findByIdForCaller, with the purchase
+  // attached: an admin cannot rule on "the item was damaged" without
+  // seeing which item, and the buyer needs to recognise which order it
+  // refers to. 404 for anyone else, so this cannot be used to read a
+  // stranger's order through a dispute id.
+  async findByIdWithOrderForCaller(
+    id: string,
+    caller: AuthenticatedUser,
+  ): Promise<DisputeWithOrderContext> {
+    const dispute = await this.disputesRepository.findByIdWithOrder(id);
+    if (
+      !dispute ||
+      (caller.role !== UserRole.ADMIN && dispute.raisedById !== caller.id)
+    ) {
       throw new NotFoundException(`Dispute ${id} not found`);
     }
     return dispute;
@@ -119,6 +168,53 @@ export class DisputesService {
       toStatus: updated.status,
     });
     return updated;
+  }
+
+  // Both sides of the conversation come through here — the buyer who
+  // raised it and the admin handling it. findByIdForCaller is what makes
+  // that safe: it 404s for anyone else, so a third party can neither read
+  // the thread nor post to it.
+  async listComments(
+    disputeId: string,
+    caller: AuthenticatedUser,
+  ): Promise<DisputeComment[]> {
+    await this.findByIdForCaller(disputeId, caller);
+    return this.disputesRepository.findComments(disputeId);
+  }
+
+  async addComment(
+    disputeId: string,
+    caller: AuthenticatedUser,
+    dto: AddDisputeCommentDto,
+  ): Promise<DisputeComment> {
+    const dispute = await this.findByIdForCaller(disputeId, caller);
+
+    // A decided dispute is closed to new argument. Without this a buyer
+    // could keep appending to a case nobody is reading any more, and the
+    // thread would stop being a reliable record of what was considered
+    // before the ruling.
+    if (
+      dispute.status === DisputeStatus.RESOLVED ||
+      dispute.status === DisputeStatus.REJECTED
+    ) {
+      throw new ConflictException(
+        `This dispute is already ${dispute.status.toLowerCase()} and can no longer be commented on`,
+      );
+    }
+
+    const comment = await this.disputesRepository.addComment({
+      disputeId,
+      authorId: caller.id,
+      body: dto.body,
+    });
+    this.logger.log({
+      event: 'dispute.commented',
+      userId: caller.id,
+      entityType: 'DisputeComment',
+      entityId: comment.id,
+      disputeId,
+    });
+    return comment;
   }
 
   private async findById(id: string): Promise<Dispute> {
