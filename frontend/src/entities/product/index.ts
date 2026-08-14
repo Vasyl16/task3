@@ -23,6 +23,7 @@ export type {
 export { productApi, productKeys } from './api/product-api';
 export { searchApi, searchKeys } from './api/search-api';
 export {
+  useMyProducts,
   useProducts,
   useProduct,
   useAdminProducts,

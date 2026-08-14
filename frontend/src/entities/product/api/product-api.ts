@@ -6,6 +6,7 @@ import type {
   ListProductsParams,
   ModerateProductInput,
   Product,
+  ProductStatus,
   UpdateProductInput,
 } from '../model/product';
 
@@ -13,6 +14,11 @@ export const productApi = {
   list: (params?: ListProductsParams) =>
     api.get<Product[]>('/products', { params: params as QueryParams }),
   byId: (id: string) => api.get<Product>(`/products/${id}`),
+  // The seller's OWN catalogue, including ARCHIVED — the public list
+  // hides those, which left a seller unable to find one to restore.
+  listOwn: (params?: { status?: ProductStatus }) =>
+    api.get<Product[]>('/products/mine', { params: params as QueryParams }),
+  restore: (id: string) => api.post<Product>(`/products/${id}/restore`),
   create: (body: CreateProductInput) => api.post<Product>('/products', body),
   update: (id: string, body: UpdateProductInput) =>
     api.patch<Product>(`/products/${id}`, body),
@@ -40,6 +46,8 @@ export const productKeys = {
     [...productKeys.lists(), params ?? {}] as const,
   details: () => [...productKeys.all, 'detail'] as const,
   detail: (id: string) => [...productKeys.details(), id] as const,
+  own: (params?: { status?: ProductStatus }) =>
+    [...productKeys.all, 'own', params ?? {}] as const,
   adminLists: () => [...productKeys.all, 'admin-list'] as const,
   adminList: (params?: AdminListProductsParams) =>
     [...productKeys.adminLists(), params ?? {}] as const,

@@ -6,6 +6,8 @@ import { paths } from '../../../app/routes/paths';
 import { formatMoney, resolveAssetUrl } from '../../../shared/lib';
 import { Badge, Card, ErrorState, PageSpinner } from '../../../shared/ui';
 import { AddToCartButton } from '../../../features/cart';
+import { RatingStars } from '../../../entities/review';
+import { ProductReviews } from '../../../widgets/product-reviews';
 
 export function ProductDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -77,6 +79,13 @@ export function ProductDetailPage() {
         >
           <div>
             <h1 style={{ margin: '0 0 var(--space-2)' }}>{product.name}</h1>
+            <div style={{ marginBottom: 'var(--space-2)' }}>
+              <RatingStars
+                value={product.ratingAverage}
+                count={product.ratingCount}
+                size="md"
+              />
+            </div>
             {product.status !== 'ACTIVE' && (
               <Badge variant="danger">Not available</Badge>
             )}
@@ -119,6 +128,10 @@ export function ProductDetailPage() {
           </p>
         )}
       </Card>
+
+      <div style={{ marginTop: 'var(--space-4)' }}>
+        <ProductReviews productId={product.id} />
+      </div>
     </div>
   );
 }

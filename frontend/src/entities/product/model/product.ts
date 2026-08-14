@@ -28,6 +28,11 @@ export interface Product {
   status: ProductStatus;
   createdAt: string;
   updatedAt: string;
+  // Aggregated live from confirmed reviews by the backend — never stored
+  // on the product row. A product nobody has reviewed reports 0/0, so
+  // there is one shape to render rather than two.
+  ratingAverage: number;
+  ratingCount: number;
   // Optional: the moderation audit trail is an internal field set, only
   // present on admin responses. The public catalog endpoints strip it —
   // see the backend's ProductsService.findAllForCatalog.
@@ -36,9 +41,14 @@ export interface Product {
   moderationNote?: string | null;
 }
 
+// 'rating' is the only non-default ordering the backend accepts; it
+// validates the value rather than passing it through to the database.
+export type ProductSort = 'newest' | 'rating';
+
 export interface ListProductsParams {
   categoryId?: string;
   sellerId?: string;
+  sort?: ProductSort;
 }
 
 export interface CreateProductInput {

@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import type { SearchResultItem } from '../../../entities/product';
 import { paths } from '../../../app/routes/paths';
+import { RatingStars } from '../../../entities/review';
 import { Badge, Card } from '../../../shared/ui';
 import { formatMoney } from '../../../shared/lib';
 import './product-card.css';
@@ -74,9 +75,9 @@ export function ProductCard({ item }: { item: SearchResultItem }) {
             <span className="product-card__price">
               {formatMoney(item.basePrice)}
             </span>
-            {item.sellerRating !== null && (
+            {item.productRating != null && (
               <span className="product-card__rating">
-                ★ {item.sellerRating.toFixed(1)}
+                <RatingStars value={item.productRating} />
               </span>
             )}
           </div>

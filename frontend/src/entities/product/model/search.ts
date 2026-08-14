@@ -19,7 +19,7 @@ export interface SearchQuery {
 }
 
 // The search read model's own shape — a Meilisearch document, not a
-// Prisma row, so basePrice/sellerRating are genuine JS numbers here
+// Prisma row, so basePrice/productRating are genuine JS numbers here
 // (unlike Product.basePrice, which is a Decimal-as-string).
 export interface SearchResultItem {
   productId: string;
@@ -30,7 +30,7 @@ export interface SearchResultItem {
   categoryName: string;
   sellerId: string;
   sellerName: string;
-  sellerRating: number | null;
+  productRating: number | null;
   type: ProductType;
   inStock: boolean;
   // Only meaningful when type === 'AUCTION': is there currently an

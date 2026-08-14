@@ -13,7 +13,7 @@ const SORT_OPTIONS: { value: SearchSortBy; label: string }[] = [
   { value: 'relevance', label: 'Relevance' },
   { value: 'newest', label: 'Newest' },
   { value: 'price', label: 'Price' },
-  { value: 'rating', label: 'Seller rating' },
+  { value: 'rating', label: 'Rating' },
 ];
 
 export function SearchFiltersBar({
