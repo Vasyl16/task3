@@ -1,0 +1,25 @@
+import { useQuery } from '@tanstack/react-query';
+import { disputeApi, disputeKeys } from '../api/dispute-api';
+import type { ListDisputesParams } from './dispute';
+
+export function useDisputes(params?: ListDisputesParams) {
+  return useQuery({
+    queryKey: disputeKeys.list(params),
+    queryFn: () => disputeApi.list(params),
+  });
+}
+
+export function useDispute(id: string | undefined) {
+  return useQuery({
+    queryKey: disputeKeys.detail(id ?? ''),
+    queryFn: () => disputeApi.byId(id as string),
+    enabled: Boolean(id),
+  });
+}
+
+export function useAdminDisputes(params?: ListDisputesParams) {
+  return useQuery({
+    queryKey: disputeKeys.adminList(params),
+    queryFn: () => disputeApi.adminList(params),
+  });
+}

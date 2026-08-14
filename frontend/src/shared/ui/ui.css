@@ -1,0 +1,687 @@
+/* Shared UI kit styles. Plain CSS with a small design-token set rather
+   than a component library: the brief asks for a functional UI, and a
+   dependency like MUI would be a large, hard-to-remove commitment made
+   before a single page exists. */
+
+:root {
+  --color-bg: #ffffff;
+  --color-surface: #f6f7fb;
+  --color-surface-raised: #ffffff;
+  --color-border: #e1e3ea;
+  --color-border-strong: #c7cad6;
+  --color-text: #16181f;
+  --color-text-muted: #666b7a;
+  --color-primary: #4338ca;
+  --color-primary-hover: #362da3;
+  --color-primary-light: #7c6ff5;
+  --color-primary-bg: #eef0fd;
+  --gradient-brand: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-light) 100%);
+  --color-accent: #d97706;
+  --color-accent-bg: #fef3e2;
+  --color-danger: #b3261e;
+  --color-danger-bg: #fdeceb;
+  --color-success: #146c43;
+  --color-success-bg: #e8f5ec;
+  --color-info: #0e6ba8;
+  --color-info-bg: #e7f3fb;
+  --color-neutral-bg: #eef0f4;
+
+  --radius: 8px;
+  --radius-lg: 14px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  --shadow-sm: 0 1px 2px rgba(22, 24, 31, 0.06);
+  --shadow-md: 0 4px 16px rgba(22, 24, 31, 0.08);
+  --shadow-lg: 0 16px 40px rgba(31, 32, 62, 0.14);
+  --shadow-primary: 0 6px 16px rgba(67, 56, 202, 0.28);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* ---------- Avatar ---------- */
+.ui-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 50%;
+  color: #fff;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* ---------- Brand mark ---------- */
+.ui-brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 9px;
+  background: var(--gradient-brand);
+  color: #fff;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: var(--shadow-primary);
+}
+
+/* ---------- Centered page (auth screens) ---------- */
+.centered-page {
+  min-height: calc(100vh - 200px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.centered-page__card {
+  width: 100%;
+  max-width: 400px;
+  box-shadow: var(--shadow-lg);
+}
+
+.centered-page__brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+  text-align: center;
+}
+
+.centered-page__brand h1 {
+  margin: 0;
+}
+
+/* ---------- Layout primitives ---------- */
+.ui-page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+  flex-wrap: wrap;
+}
+
+.ui-page-header__title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 0 0 var(--space-1);
+  letter-spacing: -0.01em;
+}
+
+.ui-page-header__subtitle {
+  color: var(--color-text-muted);
+  margin: 0;
+  font-size: 0.9375rem;
+}
+
+.ui-page-header__actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.ui-section {
+  margin-bottom: var(--space-6);
+}
+
+.ui-section__title {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  margin: 0 0 var(--space-3);
+}
+
+/* ---------- Card ---------- */
+.ui-card {
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+  box-shadow: var(--shadow-sm);
+}
+
+.ui-card--tight {
+  padding: var(--space-4);
+}
+
+.ui-card--interactive {
+  transition:
+    box-shadow 0.15s ease,
+    border-color 0.15s ease,
+    transform 0.15s ease;
+}
+
+.ui-card--interactive:hover {
+  box-shadow: var(--shadow-md);
+  border-color: var(--color-border-strong);
+  transform: translateY(-1px);
+}
+
+/* ---------- Grid ---------- */
+.ui-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-4);
+}
+
+.ui-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-4);
+}
+
+/* ---------- Stat tile ---------- */
+.ui-stat {
+  position: relative;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-4) var(--space-4) var(--space-4) calc(var(--space-4) + 4px);
+  overflow: hidden;
+}
+
+.ui-stat::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: var(--gradient-brand);
+}
+
+.ui-stat__label {
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+  margin: 0 0 var(--space-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.ui-stat__value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-stat__delta {
+  display: inline-block;
+  margin-top: var(--space-2);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.ui-stat__delta--up {
+  color: var(--color-success);
+}
+
+.ui-stat__delta--down {
+  color: var(--color-danger);
+}
+
+.ui-stat__delta--flat {
+  color: var(--color-text-muted);
+}
+
+/* ---------- Badge ---------- */
+.ui-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.ui-badge--neutral {
+  background: var(--color-neutral-bg);
+  color: var(--color-text-muted);
+}
+
+.ui-badge--success {
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+
+.ui-badge--danger {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+
+.ui-badge--info {
+  background: var(--color-info-bg);
+  color: var(--color-info);
+}
+
+.ui-badge--accent {
+  background: var(--color-accent-bg);
+  color: var(--color-accent);
+}
+
+/* ---------- Tabs ---------- */
+.ui-tabs {
+  display: flex;
+  gap: var(--space-1);
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: var(--space-5);
+  overflow-x: auto;
+}
+
+.ui-tabs__link {
+  padding: var(--space-3) var(--space-4);
+  text-decoration: none;
+  color: var(--color-text-muted);
+  font-weight: 500;
+  font-size: 0.9375rem;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+}
+
+.ui-tabs__link:hover {
+  color: var(--color-text);
+}
+
+.ui-tabs__link--active {
+  color: var(--color-primary);
+  border-bottom-color: var(--color-primary);
+}
+
+/* ---------- Table ---------- */
+.ui-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface-raised);
+}
+
+.ui-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9375rem;
+}
+
+.ui-table th {
+  text-align: left;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+
+.ui-table td {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: middle;
+}
+
+.ui-table tr:last-child td {
+  border-bottom: none;
+}
+
+.ui-table tbody tr:hover {
+  background: var(--color-surface);
+}
+
+/* ---------- Checkbox ---------- */
+.ui-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  font-size: 0.9375rem;
+  color: var(--color-text);
+}
+
+.ui-checkbox__input {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  margin: 0;
+  border: 1.5px solid var(--color-border-strong);
+  border-radius: 5px;
+  background: var(--color-bg);
+  display: inline-grid;
+  place-content: center;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.ui-checkbox__input::before {
+  content: '';
+  width: 10px;
+  height: 10px;
+  background: #fff;
+  transform: scale(0);
+  transition: transform 0.1s ease;
+  clip-path: polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%);
+}
+
+.ui-checkbox__input:checked {
+  background: var(--gradient-brand);
+  border-color: transparent;
+}
+
+.ui-checkbox__input:checked::before {
+  transform: scale(1);
+}
+
+.ui-checkbox__input:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.ui-checkbox__input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ---------- Select / Textarea ---------- */
+.ui-field__select,
+.ui-field__textarea {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font: inherit;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+/* A custom chevron in place of the browser's native one — appearance:
+   none drops the OS-drawn arrow (and its inconsistent look across
+   browsers), replaced with one drawn in CSS so it always matches the
+   rest of the kit. Still a real <select>: full keyboard/native picker
+   behaviour, just restyled. */
+.ui-field__select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: var(--space-6);
+  background-image: linear-gradient(45deg, transparent 50%, var(--color-text-muted) 50%),
+    linear-gradient(135deg, var(--color-text-muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 20px) center,
+    calc(100% - 15px) center;
+  background-size:
+    5px 5px,
+    5px 5px;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+
+.ui-field__textarea {
+  resize: vertical;
+  min-height: 80px;
+}
+
+.ui-field__select:focus-visible,
+.ui-field__textarea:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+/* ---------- Button ---------- */
+.ui-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.ui-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.ui-button--primary {
+  background: var(--gradient-brand);
+  color: #fff;
+  box-shadow: var(--shadow-primary);
+}
+
+/* No `transform` here on purpose — it used to lift the button 1px on
+   hover, which is a classic hover-flicker trigger: moving the element
+   can push its own edge out from under a cursor that hasn't moved,
+   firing mouseleave, which un-hovers it, which moves it back, which
+   re-fires mouseenter — an oscillation that reads as the button
+   flickering. box-shadow/background changes give the same "lit up"
+   feedback without moving the hit box at all. */
+.ui-button--primary:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+  box-shadow: 0 8px 20px rgba(67, 56, 202, 0.34);
+}
+
+.ui-button--secondary {
+  background: var(--color-bg);
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+
+.ui-button--secondary:hover:not(:disabled) {
+  background: var(--color-surface);
+}
+
+.ui-button--ghost {
+  background: transparent;
+  color: var(--color-primary);
+}
+
+.ui-button--danger {
+  background: var(--color-danger);
+  color: #fff;
+}
+
+.ui-button--danger:hover:not(:disabled) {
+  background: #93201a;
+}
+
+.ui-button--sm {
+  padding: var(--space-1) var(--space-3);
+  font-size: 0.8125rem;
+}
+
+/* ---------- Field ---------- */
+.ui-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-bottom: var(--space-4);
+}
+
+.ui-field__label {
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.ui-field__input {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font: inherit;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+.ui-field__input:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+.ui-field__input--invalid {
+  border-color: var(--color-danger);
+}
+
+.ui-field__error {
+  font-size: 0.8125rem;
+  color: var(--color-danger);
+}
+
+/* ---------- Spinner ---------- */
+.ui-spinner {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: ui-spin 0.7s linear infinite;
+}
+
+.ui-spinner--lg {
+  width: 32px;
+  height: 32px;
+  border-width: 3px;
+}
+
+@keyframes ui-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Respect a user's reduced-motion preference: keep the indicator, drop
+   the spin. Screen readers get the role="status" label either way. */
+@media (prefers-reduced-motion: reduce) {
+  .ui-spinner {
+    animation-duration: 3s;
+  }
+}
+
+.ui-centered-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-6) var(--space-4);
+  text-align: center;
+  color: var(--color-text-muted);
+}
+
+/* ---------- Alert ---------- */
+.ui-alert {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  margin-bottom: var(--space-4);
+}
+
+.ui-alert--error {
+  background: var(--color-danger-bg);
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.ui-alert--info {
+  background: var(--color-surface);
+  border-color: var(--color-border);
+  color: var(--color-text);
+}
+
+.ui-alert__list {
+  margin: var(--space-1) 0 0;
+  padding-left: var(--space-5);
+}
+
+/* ---------- Toast ---------- */
+.ui-toast-viewport {
+  position: fixed;
+  top: var(--space-4);
+  right: var(--space-4);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-width: 360px;
+  width: calc(100vw - var(--space-4) * 2);
+}
+
+.ui-toast {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-raised);
+  box-shadow: var(--shadow-lg);
+  animation: ui-toast-in 0.2s ease-out;
+}
+
+@keyframes ui-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ui-toast--success {
+  border-left: 3px solid var(--color-success);
+}
+
+.ui-toast--danger {
+  border-left: 3px solid var(--color-danger);
+}
+
+.ui-toast--info {
+  border-left: 3px solid var(--color-info);
+}
+
+.ui-toast__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.ui-toast__title {
+  margin: 0;
+  font-weight: 600;
+  font-size: 0.875rem;
+  color: var(--color-text);
+}
+
+.ui-toast__description {
+  margin: var(--space-1) 0 0;
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+}
+
+.ui-toast__dismiss {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 1.125rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.ui-toast__dismiss:hover {
+  color: var(--color-text);
+}

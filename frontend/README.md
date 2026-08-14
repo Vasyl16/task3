@@ -1,32 +1,69 @@
-# React + TypeScript + Vite
+# Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React 19 + TypeScript on Vite, organised as Feature-Sliced Design. See
+`../.claude/skills/frontend-architecture` for the layer rules and
+`../README.md` for how to run it (two launch modes).
 
-Currently, two official plugins are available:
+## Stack
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+| Concern | Choice |
+| --- | --- |
+| Server state | TanStack Query |
+| Routing | React Router (`createBrowserRouter`) |
+| Forms | React Hook Form + Zod (via `@hookform/resolvers`) |
+| Realtime | Socket.IO client (`shared/realtime/`), one connection for the app |
+| Local/UI state | plain React state and context |
+| Styling | plain CSS with design tokens in `shared/ui/ui.css` |
+| Tests | Vitest + Testing Library (jsdom) |
 
-## React Compiler
+There is deliberately **no global state library**. Nearly everything on
+screen is server state, which belongs in TanStack Query's cache; putting
+it in a store as well would create a second copy to keep in sync. The
+only genuinely global client state is the session, which is a context.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Layers
 
-## Expanding the Oxlint configuration
+`shared/` → `entities/` → `features/` → `widgets/` → `pages/` → `app/`.
+Imports only ever point downward. Each layer's `README.md` says what
+belongs in it, and `entities/README.md` maps entity slices onto the
+backend's modules.
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+## What exists today
 
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
-```
+The full app:
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+- **Foundation** — app bootstrap and providers, routing with a role-
+  aware route guard, the HTTP client, session handling, the UI kit.
+- **Customer marketplace** — catalog + search (filters/sort/pagination
+  live in the URL), product and auction detail, cart with optimistic
+  updates (rollback on failure), checkout, order history and detail.
+- **Realtime** — `shared/realtime/` wraps the backend's Socket.IO
+  gateway; product stock, auction bids, and order status update live on
+  screen. A dropped connection re-subscribes from scratch on reconnect
+  rather than trusting whatever arrived before the drop — see
+  `frontend-architecture`'s realtime notes.
+- **Seller dashboard** (`/seller/*`, role `SELLER`) — overview/analytics
+  with a 30-day sales chart, product management, auction creation,
+  SellerOrder status management.
+- **Admin dashboard** (`/admin/*`, role `ADMIN`) — seller-application
+  review, product moderation, dispute resolution, platform analytics
+  with period comparison and CSV/JSON export.
+
+Every mutation trusts the backend as the actual authority — ownership,
+valid status transitions, and business rules are re-checked server-side
+regardless of what the UI shows or greys out; see each feature's own
+comments for the specific rule being mirrored and why.
+
+## Two rules worth knowing before adding code
+
+**The frontend never owns a business rule.** Pricing, stock,
+authorization, and state transitions are decided by the backend. Zod
+schemas here exist to spare the user a round trip, and they mirror the
+backend's DTO constraints rather than replacing them — where the two
+disagree, the backend's answer is the one that counts and its message is
+what gets shown.
+
+**Route guards are navigation, not security.** `ProtectedRoute` reads a
+role from an unverified client-side decode of the access token, so it
+can only decide what to *show*. Anyone can edit localStorage; nothing is
+actually protected until the backend checks the token's signature.
