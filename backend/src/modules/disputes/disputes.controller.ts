@@ -1,5 +1,7 @@
 import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { UserRole } from '@prisma/client';
 import { CurrentUser } from '../../core/auth/decorators/current-user.decorator';
+import { Roles } from '../../core/auth/decorators/roles.decorator';
 import type { AuthenticatedUser } from '../../core/auth/authenticated-user.interface';
 import { DisputesService } from './disputes.service';
 import { AddDisputeCommentDto } from './dto/add-dispute-comment.dto';
@@ -41,6 +43,24 @@ export class DisputesController {
   // which product, what was paid. Serves the buyer's own view and the
   // admin queue from one endpoint, because both need exactly this and
   // the access rule is identical.
+  // Registered before ':id' — otherwise Nest matches "seller" as an id.
+  @Roles(UserRole.SELLER)
+  @Get('seller')
+  @ApiOperation({
+    summary: 'Disputes raised against your shipments',
+    description:
+      'For sellers. Scoped to the caller’s own approved profile, so a ' +
+      'seller can never be handed complaints about another seller’s ' +
+      'orders. There is no sellerId parameter to point elsewhere.',
+  })
+  @ApiOkResponse({ description: 'Paginated disputes, newest first.' })
+  listForSeller(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ListDisputesQuery,
+  ) {
+    return this.disputesService.listForSeller(user.id, query);
+  }
+
   @Get(':id')
   @ApiOperation({
     summary: 'Get a dispute, with the purchase it is about',

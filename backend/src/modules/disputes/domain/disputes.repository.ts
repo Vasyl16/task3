@@ -11,6 +11,9 @@ export interface DisputeWithOrderContext extends Dispute {
     status: string;
     subtotal: unknown;
     orderId: string;
+    // Needed to authorize the SELLER whose shipment this is — see
+    // DisputesService.assertCanAccess.
+    sellerId: string;
     items: {
       id: string;
       quantity: number;
@@ -30,6 +33,12 @@ export interface DisputeListFilter {
   status?: DisputeStatus;
   raisedById?: string;
   sellerOrderId?: string;
+  // Disputes about shipments belonging to this seller. Resolved from the
+  // caller's own approved profile, never a client-supplied id.
+  sellerId?: string;
+  search?: string;
+  skip?: number;
+  take?: number;
 }
 
 export abstract class DisputesRepository {
@@ -37,7 +46,9 @@ export abstract class DisputesRepository {
   abstract findByIdWithOrder(
     id: string,
   ): Promise<DisputeWithOrderContext | null>;
-  abstract findMany(filter: DisputeListFilter): Promise<Dispute[]>;
+  abstract findMany(
+    filter: DisputeListFilter,
+  ): Promise<{ items: Dispute[]; total: number }>;
   // "Already being argued about" — an OPEN or UNDER_REVIEW dispute for
   // this exact scope. Scoped to the LINE when orderItemId is given, so
   // disputing item A does not block disputing item B on the same order;

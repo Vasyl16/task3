@@ -13,8 +13,10 @@ import {
 } from '@prisma/client';
 import type { AuthenticatedUser } from '../../core/auth/authenticated-user.interface';
 import { OrdersService } from '../orders/orders.service';
+import { SellersService } from '../sellers/sellers.service';
+import { toPageParams, type Paginated } from '../../core/pagination';
+import { ListDisputesQuery } from './dto/list-disputes.query';
 import {
-  DisputeListFilter,
   DisputesRepository,
   type DisputeWithOrderContext,
 } from './domain/disputes.repository';
@@ -36,6 +38,8 @@ export class DisputesService {
     // raise one — the ownership check lives in OrdersService, which owns
     // that fact, rather than being re-derived here.
     private readonly ordersService: OrdersService,
+    // Only to resolve the caller's own seller profile for listForSeller.
+    private readonly sellersService: SellersService,
   ) {}
 
   // The raiser is the authenticated caller, never a body field, and the
@@ -93,45 +97,92 @@ export class DisputesService {
     return dispute;
   }
 
-  listForAdmin(filter: DisputeListFilter): Promise<Dispute[]> {
-    return this.disputesRepository.findMany(filter);
+  async listForAdmin(query: ListDisputesQuery): Promise<Paginated<Dispute>> {
+    const { skip, take, page, limit } = toPageParams(query);
+    const { items, total } = await this.disputesRepository.findMany({
+      status: query.status,
+      sellerOrderId: query.sellerOrderId,
+      search: query.search,
+      skip,
+      take,
+    });
+    return { items, total, page, limit };
   }
 
-  listOwn(caller: AuthenticatedUser, filter: DisputeListFilter) {
-    return this.disputesRepository.findMany({
-      ...filter,
+  // The caller's own disputes. raisedById is applied AFTER the query, so
+  // nothing a client sends can widen it to someone else's.
+  async listOwn(
+    caller: AuthenticatedUser,
+    query: ListDisputesQuery,
+  ): Promise<Paginated<Dispute>> {
+    const { skip, take, page, limit } = toPageParams(query);
+    const { items, total } = await this.disputesRepository.findMany({
+      status: query.status,
+      sellerOrderId: query.sellerOrderId,
+      search: query.search,
+      skip,
+      take,
       raisedById: caller.id,
     });
+    return { items, total, page, limit };
   }
 
-  async findByIdForCaller(
-    id: string,
-    caller: AuthenticatedUser,
-  ): Promise<Dispute> {
-    const dispute = await this.findById(id);
-    if (caller.role !== UserRole.ADMIN && dispute.raisedById !== caller.id) {
-      throw new NotFoundException(`Dispute ${id} not found`);
-    }
-    return dispute;
+  // Disputes raised against the caller's OWN shipments. The seller is
+  // resolved from their approved profile, so a seller can never be
+  // handed complaints about another seller's orders.
+  async listForSeller(
+    callerId: string,
+    query: ListDisputesQuery,
+  ): Promise<Paginated<Dispute>> {
+    const profile =
+      await this.sellersService.getOwnApprovedSellerProfileOrThrow(callerId);
+    const { skip, take, page, limit } = toPageParams(query);
+    const { items, total } = await this.disputesRepository.findMany({
+      status: query.status,
+      search: query.search,
+      skip,
+      take,
+      sellerId: profile.id,
+    });
+    return { items, total, page, limit };
   }
 
-  // The same access rule as findByIdForCaller, with the purchase
-  // attached: an admin cannot rule on "the item was damaged" without
-  // seeing which item, and the buyer needs to recognise which order it
-  // refers to. 404 for anyone else, so this cannot be used to read a
-  // stranger's order through a dispute id.
+  // Three people may ever read or post to a dispute: the buyer who
+  // raised it, any admin, and the SELLER whose shipment it is about — a
+  // seller has to be able to see what was said about their own order,
+  // and answer it, even though they didn't raise the case and aren't
+  // ruling on it. Everyone else gets 404, never 403: confirming the id
+  // exists would turn this into an existence oracle for other people's
+  // orders.
+  //
+  // Always fetches WITH the order attached, even for callers who only
+  // need the bare Dispute — the seller check needs sellerOrder.sellerId,
+  // and a second query to re-fetch it would be pure waste.
   async findByIdWithOrderForCaller(
     id: string,
     caller: AuthenticatedUser,
   ): Promise<DisputeWithOrderContext> {
     const dispute = await this.disputesRepository.findByIdWithOrder(id);
-    if (
-      !dispute ||
-      (caller.role !== UserRole.ADMIN && dispute.raisedById !== caller.id)
-    ) {
+    if (!dispute) {
       throw new NotFoundException(`Dispute ${id} not found`);
     }
-    return dispute;
+    if (caller.role === UserRole.ADMIN || dispute.raisedById === caller.id) {
+      return dispute;
+    }
+    if (caller.role === UserRole.SELLER) {
+      const profile = await this.sellersService.findByUserId(caller.id);
+      if (profile?.id === dispute.sellerOrder.sellerId) {
+        return dispute;
+      }
+    }
+    throw new NotFoundException(`Dispute ${id} not found`);
+  }
+
+  private async findByIdForCaller(
+    id: string,
+    caller: AuthenticatedUser,
+  ): Promise<Dispute> {
+    return this.findByIdWithOrderForCaller(id, caller);
   }
 
   // Admin-only (enforced by @Roles(ADMIN) on AdminController). Moves the
