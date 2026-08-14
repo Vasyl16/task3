@@ -79,7 +79,13 @@ USER node
 
 EXPOSE 3000
 
-# Deliberately NOT `prisma migrate deploy && node dist/main`. Applying a
-# migration to the remote database is a reviewed action, never a side
-# effect of starting a container — see README "Database (Prisma)".
-CMD ["node", "dist/main"]
+# dist/src/main, not dist/main: prisma.config.ts and prisma/seed.ts are
+# part of the compilation, so tsc's common source root is the project
+# directory rather than src/, and the output is nested a level deeper
+# than a plain Nest app's would be. Verify with `ls dist/` after a build
+# before changing this.
+#
+# Deliberately NOT `prisma migrate deploy && node dist/src/main`.
+# Applying a migration to the remote database is a reviewed action, never
+# a side effect of starting a container — see README "Database (Prisma)".
+CMD ["node", "dist/src/main"]

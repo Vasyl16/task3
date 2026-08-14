@@ -167,12 +167,41 @@ if something required is missing or malformed — see
 
 ## Running the app
 
-There are two supported ways to launch, and they share one
-`docker-compose.yml`. Pick by what you're doing:
+Two supported variants, one `docker-compose.yml`. Both need
+`backend/.env` in place first — see "First-time setup" below.
 
-| | **Full — everything in Docker** | **Hybrid — infra in Docker, apps on the host** |
+**Variant 1 — everything in Docker.** One command, no local Node needed.
+Use it to run the system: demos, review, checking it works on a clean
+machine.
+
+```bash
+docker compose --profile full up -d
+# frontend :5173 · backend :3000 · grafana :3001
+```
+
+**Variant 2 — infra in Docker, apps on the host.** Use it to develop:
+the containers hold the things you don't edit, the host runs the things
+you do, with hot reload on both.
+
+```bash
+docker compose up -d                              # redis, meilisearch, observability
+cd backend  && npm install && npm run start:dev   # :3000, watch mode
+cd frontend && npm install && npm run dev         # :5173, Vite HMR
+```
+
+The two app services carry `profiles: ['full']`, and Compose skips a
+profiled service unless its profile is named. That single mechanism is
+what lets the same file serve both variants: naming the profile adds the
+apps, omitting it leaves infra alone. It is also why variant 1 keeps the
+`--profile full` flag rather than being a bare `docker compose up` — a
+plain `up` already means variant 2, and one command cannot mean both.
+
+Details and trade-offs:
+
+| | **Variant 1 — everything in Docker** | **Variant 2 — infra in Docker, apps on the host** |
 | --- | --- | --- |
 | Command | `docker compose --profile full up -d` | `docker compose up -d`, then `npm run start:dev` / `npm run dev` |
+| Local Node needed | no | yes (24+) |
 | Backend | container (compiled, `node dist/main`) | host, watch mode |
 | Frontend | container (static build behind nginx) | host, Vite dev server + HMR |
 | Redis, Meilisearch, observability | containers | containers |
@@ -180,18 +209,18 @@ There are two supported ways to launch, and they share one
 | Hot reload | no — code changes need a rebuild | yes |
 | Best for | running the whole system, demos, checking it works from a clean machine | actually developing |
 
-Both modes need `backend/.env` first (see below): `DATABASE_URL` and the
+Both variants need `backend/.env` first (see below): `DATABASE_URL` and the
 two JWT secrets are required and have no defaults, so the app fails fast
-without them. PostgreSQL is remote in **both** modes — nothing here ever
+without them. PostgreSQL is remote in **both** variants — nothing here ever
 brings up a database container.
 
 ### Prerequisites
 
 - Docker (with Compose v2)
 - A reachable PostgreSQL instance and its connection string
-- Node.js 24+ — **hybrid mode only**; full mode needs no local Node
+- Node.js 24+ — **variant 2 only**; variant 1 needs no local Node
 
-### First-time setup (both modes)
+### First-time setup (both variants)
 
 ```bash
 cp backend/.env.example backend/.env    # fill in DATABASE_URL + JWT secrets
@@ -217,7 +246,7 @@ is why `migrate` is a one-off service on its own profile, and why the
 Prisma CLI is pruned out of the image the backend actually serves from:
 a running container cannot migrate anything.
 
-### Mode 1 — Full (everything in Docker)
+### Variant 1 — everything in Docker
 
 ```bash
 docker compose --profile full up -d
@@ -249,7 +278,7 @@ definition — never put a secret in one.
 Shut down with `docker compose --profile full down` (add `-v` to also
 drop the Redis/Meilisearch/Grafana volumes).
 
-### Mode 2 — Hybrid (infra in Docker, apps on the host)
+### Variant 2 — infra in Docker, apps on the host
 
 The better setup for development: containers for the things you don't
 edit, hot reload for the things you do.

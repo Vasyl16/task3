@@ -1,14 +1,23 @@
-# Two launch modes, one file (see README.md "Running the app"):
+# Two launch variants, one file (see README.md "Running the app"):
 #
-#   docker compose up -d                  -> infra only (hybrid mode);
-#                                            backend/frontend run on the
-#                                            host with hot reload.
-#   docker compose --profile full up -d   -> infra + backend + frontend,
-#                                            everything containerised.
+#   Variant 1 — everything in Docker. Nothing runs on the host; no local
+#   Node toolchain needed. For running the system rather than editing it.
+#
+#     docker compose --profile full up -d
+#
+#   Variant 2 — infra in Docker, apps on the host with hot reload. The
+#   development setup.
+#
+#     docker compose up -d
+#     cd backend  && npm run start:dev
+#     cd frontend && npm run dev
 #
 # The app services below carry `profiles: ['full']`, which is what makes
 # that work: Compose skips a profiled service unless its profile is
 # explicitly enabled, so the plain `up` is unchanged by their presence.
+# It is also why variant 1 keeps the flag instead of being a bare
+# `docker compose up` — a plain `up` already means variant 2, and one
+# command cannot mean both.
 #
 # PostgreSQL is intentionally NOT defined here — it is a remote/external
 # database (see backend/.env.example DATABASE_URL). Every write path that
