@@ -68,14 +68,37 @@ describe('tokenStorage', () => {
   it('degrades to a memory-less session when storage is unavailable', () => {
     // Safari private mode and locked-down browsers throw on access.
     // Booting without a persisted session beats crashing on load.
-    vi.spyOn(window.localStorage, 'getItem').mockImplementation(() => {
+    //
+    // Swaps the whole object rather than spying on its methods. The
+    // polyfill in src/test/setup.ts is installed only on jsdom builds
+    // whose localStorage is unusable, so on other builds the methods
+    // live on Storage.prototype and an instance spy silently fails to
+    // take effect — the storage would keep working and this test would
+    // pass or fail depending on which machine ran it.
+    const original = Object.getOwnPropertyDescriptor(window, 'localStorage');
+    const unavailable = () => {
       throw new Error('storage disabled');
-    });
-    vi.spyOn(window.localStorage, 'setItem').mockImplementation(() => {
-      throw new Error('storage disabled');
+    };
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: unavailable,
+        setItem: unavailable,
+        removeItem: unavailable,
+        clear: unavailable,
+        key: unavailable,
+        get length(): number {
+          return unavailable();
+        },
+      },
     });
 
-    expect(() => tokenStorage.set(tokens)).not.toThrow();
-    expect(tokenStorage.getAccessToken()).toBeNull();
+    try {
+      expect(() => tokenStorage.set(tokens)).not.toThrow();
+      expect(tokenStorage.getAccessToken()).toBeNull();
+    } finally {
+      if (original) Object.defineProperty(window, 'localStorage', original);
+      else delete (window as { localStorage?: unknown }).localStorage;
+    }
   });
 });

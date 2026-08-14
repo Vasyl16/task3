@@ -226,6 +226,17 @@ jobs:
           dockerfile: frontend/Dockerfile
           failure-threshold: warning
 
+      # compose resolves `env_file: ./backend/.env` at config time, and
+      # that file is gitignored — it holds real credentials and must
+      # never be in the repo. The committed template has the same keys
+      # with placeholder values, which is all `config` needs: it checks
+      # that the file parses, not what the values mean. Kept strict
+      # rather than marking the env_file `required: false`, so a
+      # developer who forgets their .env still gets a clear error
+      # instead of a container that starts misconfigured.
+      - name: Provide a placeholder backend/.env for validation
+        run: cp backend/.env.example backend/.env
+
       # Fully resolves the compose file — interpolation, profiles, the
       # lot. Catches a malformed service long before someone runs `up`.
       - name: Validate docker-compose (both profiles)
