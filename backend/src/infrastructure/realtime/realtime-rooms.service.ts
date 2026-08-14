@@ -206,7 +206,12 @@ export class RealtimeRoomsService {
         startingPrice: auction.startingPrice.toString(),
         minBidIncrement: auction.minBidIncrement.toString(),
         currentHighestBid: auction.currentHighestBid?.toString() ?? null,
-        currentHighestBidderId: auction.currentHighestBidderId,
+        // currentHighestBidderId is deliberately NOT broadcast: this
+        // snapshot goes to every subscriber in the auction room, so
+        // including it would publish who is winning to all of them —
+        // the same leak the REST projection closes (see
+        // BiddingService.toPublicAuction). A client learns whether IT is
+        // winning from GET /auctions/:id, which is per-caller.
         version: auction.version,
         startsAt: auction.startsAt.toISOString(),
         endsAt: auction.endsAt.toISOString(),

@@ -45,6 +45,19 @@ export const REALTIME_CONSUMER_NAME = 'realtime';
 // authoritative endpoint named in it, and no server-side decision is
 // made from a broadcast — so a late message degrades to a redundant
 // refresh hint rather than corrupting anything.
+// Auction rooms are public: anyone watching the lot receives every
+// envelope sent to them. These two fields name a real user, so they are
+// removed before broadcast — a targeted notification room is the only
+// place a bidder is ever identified, and only to themselves.
+function withoutBidderIdentity(
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  const rest = { ...payload };
+  delete rest.bidderId;
+  delete rest.winningBidderId;
+  return rest;
+}
+
 @Injectable()
 @Processor(QueueName.REALTIME)
 export class RealtimeConsumer extends DomainEventConsumer {
@@ -110,7 +123,10 @@ export class RealtimeConsumer extends DomainEventConsumer {
           this.envelope(
             auctionRoom(auctionId),
             RealtimeEventName.AUCTION_BID_UPDATED,
-            payload,
+            // bidderId is stripped: this goes to every subscriber in the
+            // auction room. The price and version are what a client
+            // needs to re-render; who placed the bid is not public.
+            withoutBidderIdentity(payload),
             authoritativeSourceForRoom(RealtimeRoomType.AUCTION, auctionId),
           ),
         ];
@@ -122,7 +138,10 @@ export class RealtimeConsumer extends DomainEventConsumer {
           this.envelope(
             auctionRoom(auctionId),
             RealtimeEventName.AUCTION_ENDED,
-            payload,
+            // Same reason as BID_PLACED: the room is everyone watching
+            // the lot, so the winner is not named to it. The winner is
+            // told privately, through their own notification room below.
+            withoutBidderIdentity(payload),
             authoritativeSourceForRoom(RealtimeRoomType.AUCTION, auctionId),
           ),
         ];

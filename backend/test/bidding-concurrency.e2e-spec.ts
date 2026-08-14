@@ -127,6 +127,68 @@ describe('Bidding concurrency (e2e, real database)', () => {
     return { auctionId: auctionRes.body.id as string };
   }
 
+  // Who is winning a lot is not public information. The API tells a
+  // caller whether THEY hold the top bid and nothing about anyone else —
+  // otherwise the auction endpoints become a map of who bids on what.
+  it('never reveals the winning bidder, and tells each caller only about themselves', async () => {
+    const { auctionId } = await makeAuctionFixture('privacy');
+    const leader = await registerUser(
+      app,
+      prisma,
+      `bidder-leader-${run}@example.com`,
+    );
+    const rival = await registerUser(
+      app,
+      prisma,
+      `bidder-rival-${run}@example.com`,
+    );
+    createdUserIds.push(leader.id, rival.id);
+
+    await request(app.getHttpServer())
+      .post(`/auctions/${auctionId}/bids`)
+      .set(...authHeader(leader))
+      .send({ amount: 100 })
+      .expect(201);
+
+    // Anonymous: no identity, and no claim about anyone.
+    const anon = await request(app.getHttpServer())
+      .get(`/auctions/${auctionId}`)
+      .expect(200);
+    expect(anon.body).not.toHaveProperty('currentHighestBidderId');
+    expect(anon.body.viewerIsHighestBidder).toBe(false);
+    // The price is still public — only the identity is withheld.
+    expect(anon.body.currentHighestBid).toBe('100');
+
+    const asLeader = await request(app.getHttpServer())
+      .get(`/auctions/${auctionId}`)
+      .set(...authHeader(leader))
+      .expect(200);
+    expect(asLeader.body.viewerIsHighestBidder).toBe(true);
+    expect(asLeader.body).not.toHaveProperty('currentHighestBidderId');
+
+    const asRival = await request(app.getHttpServer())
+      .get(`/auctions/${auctionId}`)
+      .set(...authHeader(rival))
+      .expect(200);
+    expect(asRival.body.viewerIsHighestBidder).toBe(false);
+
+    // Bid history: amounts and timestamps, never a bidder id.
+    const history = await request(app.getHttpServer())
+      .get(`/auctions/${auctionId}/bids`)
+      .set(...authHeader(rival))
+      .expect(200);
+    expect(history.body).toHaveLength(1);
+    expect(history.body[0]).not.toHaveProperty('bidderId');
+    expect(history.body[0].isMine).toBe(false);
+    expect(history.body[0].amount).toBe('100');
+
+    const ownHistory = await request(app.getHttpServer())
+      .get(`/auctions/${auctionId}/bids`)
+      .set(...authHeader(leader))
+      .expect(200);
+    expect(ownHistory.body[0].isMine).toBe(true);
+  }, 20000);
+
   it('accepts a normal bid at the starting price', async () => {
     const { auctionId } = await makeAuctionFixture('normal');
     const bidder = await registerUser(

@@ -181,6 +181,20 @@ export function teardown(data) {
   const auction = JSON.parse(http.get(`${BASE_URL}/auctions/${data.auctionId}`).body);
   const bids = JSON.parse(http.get(`${BASE_URL}/auctions/${data.auctionId}/bids`).body);
 
+  // Bidder identities are no longer returned by the API — who is winning
+  // a lot is not public (see BiddingService.toPublicAuction). So instead
+  // of comparing ids, ask every bidder AS THEMSELVES whether they hold
+  // the top bid. Exactly one must say yes, which is a stronger check
+  // than the id comparison was: it proves the per-caller projection
+  // agrees with the stored winner, not merely that two fields in one
+  // response match each other.
+  const claimants = data.bidders.filter((token) => {
+    const res = http.get(`${BASE_URL}/auctions/${data.auctionId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return res.status === 200 && JSON.parse(res.body).viewerIsHighestBidder === true;
+  });
+
   const amounts = bids.map((b) => Number(b.amount)).sort((a, b) => a - b);
   const highest = amounts.length ? amounts[amounts.length - 1] : null;
 
@@ -208,7 +222,9 @@ export function teardown(data) {
     // No accepted bid is ever lower than one accepted before it. This is
     // the definition of "no lost update" for this domain.
     acceptedChainStrictlyAscending: strictlyAscending,
-    winnerIsHighestBidder: auction.currentHighestBidderId === (bids.find((b) => Number(b.amount) === highest) || {}).bidderId,
+    // Exactly one bidder — never zero, never two — is told they hold it.
+    biddersClaimingTheLot: claimants.length,
+    exactlyOneBidderHoldsTheLot: claimants.length === 1,
   };
 
   console.log("\n===== BUSINESS CORRECTNESS =====");
@@ -216,6 +232,10 @@ export function teardown(data) {
     console.log(`  ${key}: ${value}`);
   }
 
-  const invariantsHeld = results.versionMatchesBidCount && results.highestBidWins && results.acceptedChainStrictlyAscending && results.winnerIsHighestBidder;
+  const invariantsHeld =
+    results.versionMatchesBidCount &&
+    results.highestBidWins &&
+    results.acceptedChainStrictlyAscending &&
+    results.exactlyOneBidderHoldsTheLot;
   console.log(`  VERDICT: ${invariantsHeld ? "all invariants held" : "INVARIANT VIOLATED"}\n`);
 }

@@ -18,6 +18,7 @@ import { UserRole } from '@prisma/client';
 import { ApiAuth } from '../../core/openapi/api-auth.decorator';
 import { CurrentUser } from '../../core/auth/decorators/current-user.decorator';
 import { Public } from '../../core/auth/decorators/public.decorator';
+import { OptionalAuth } from '../../core/auth/decorators/optional-auth.decorator';
 import { Roles } from '../../core/auth/decorators/roles.decorator';
 import type { AuthenticatedUser } from '../../core/auth/authenticated-user.interface';
 import { IdempotencyInterceptor } from '../../infrastructure/idempotency/idempotency.interceptor';
@@ -37,15 +38,26 @@ export class BiddingController {
   constructor(private readonly biddingService: BiddingService) {}
 
   @Public()
+  @OptionalAuth()
   @Get()
-  @ApiOperation({ summary: 'List auctions (public)' })
+  @ApiOperation({
+    summary: 'List auctions (public)',
+    description:
+      'Bidder identities are never returned. A signed-in caller gets ' +
+      'viewerIsHighestBidder telling them whether THEY are currently ' +
+      'winning each lot; anonymous callers always get false.',
+  })
   @ApiQuery({ name: 'productId', required: false })
   @ApiQuery({ name: 'sellerId', required: false })
   findAuctions(
+    @CurrentUser() viewer: AuthenticatedUser | undefined,
     @Query('productId') productId?: string,
     @Query('sellerId') sellerId?: string,
   ) {
-    return this.biddingService.findAuctions({ productId, sellerId });
+    return this.biddingService.findPublicAuctions(
+      { productId, sellerId },
+      viewer?.id,
+    );
   }
 
   // Registered before ':id' — otherwise Nest would match "mine" as an
@@ -61,17 +73,23 @@ export class BiddingController {
   }
 
   @Public()
+  @OptionalAuth()
   @Get(':id')
   @ApiOperation({
     summary: 'Get one auction (public)',
     description:
-      'Includes currentHighestBid and the optimistic-locking `version`. ' +
-      'For live updates, subscribe to the `auction:{id}` WebSocket room ' +
-      'instead of polling.',
+      'Includes currentHighestBid and the optimistic-locking `version`, ' +
+      'and — for a signed-in caller — viewerIsHighestBidder. The winning ' +
+      "bidder's id is NOT returned to anyone: who is winning a lot is not " +
+      'public information. For live updates, subscribe to the ' +
+      '`auction:{id}` WebSocket room instead of polling.',
   })
   @ApiResponse({ status: 404, description: 'No such auction.' })
-  findAuctionById(@Param('id') id: string) {
-    return this.biddingService.findAuctionById(id);
+  findAuctionById(
+    @Param('id') id: string,
+    @CurrentUser() viewer: AuthenticatedUser | undefined,
+  ) {
+    return this.biddingService.findPublicAuctionById(id, viewer?.id);
   }
 
   @Roles(UserRole.SELLER)
@@ -101,10 +119,20 @@ export class BiddingController {
   }
 
   @Public()
+  @OptionalAuth()
   @Get(':id/bids')
-  @ApiOperation({ summary: 'Bid history for an auction (public)' })
-  listBids(@Param('id') id: string) {
-    return this.biddingService.listBids(id);
+  @ApiOperation({
+    summary: 'Bid history for an auction (public)',
+    description:
+      'Amounts and timestamps only — bidderId is never returned, so the ' +
+      'history cannot be used to profile who bids on what. Each row ' +
+      'carries isMine for the signed-in caller.',
+  })
+  listBids(
+    @Param('id') id: string,
+    @CurrentUser() viewer: AuthenticatedUser | undefined,
+  ) {
+    return this.biddingService.listPublicBids(id, viewer?.id);
   }
 
   // Idempotent when the client sends an Idempotency-Key header — a
