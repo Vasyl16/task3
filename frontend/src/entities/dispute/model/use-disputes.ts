@@ -31,3 +31,11 @@ export function useDisputeComments(disputeId: string | undefined) {
     enabled: Boolean(disputeId),
   });
 }
+
+// SELLER only — disputes raised against the caller's own shipments.
+export function useSellerDisputes(params?: ListDisputesParams) {
+  return useQuery({
+    queryKey: disputeKeys.sellerList(params),
+    queryFn: () => disputeApi.sellerList(params),
+  });
+}

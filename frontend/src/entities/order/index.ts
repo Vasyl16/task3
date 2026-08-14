@@ -7,6 +7,7 @@ export type {
   SellerOrderWithItems,
   OrderWithSellerOrders,
   OrderCheckoutResult,
+  AdminListOrdersParams,
   SellerOrderWithOrderContext,
 } from './model/order';
 export { SELLER_ORDER_NEXT_STATUS } from './model/order';

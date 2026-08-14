@@ -1,5 +1,5 @@
 import { api } from '../../../shared/api';
-import type { QueryParams } from '../../../shared/api';
+import type { Paginated, QueryParams } from '../../../shared/api';
 import type {
   AddDisputeCommentInput,
   CreateDisputeInput,
@@ -14,7 +14,12 @@ export const disputeApi = {
   // Scoped server-side to the caller — a customer only ever sees their
   // own disputes here, regardless of params.
   list: (params?: ListDisputesParams) =>
-    api.get<Dispute[]>('/disputes', { params: params as QueryParams }),
+    api.get<Paginated<Dispute>>('/disputes', { params: params as QueryParams }),
+  // SELLER only — complaints about the caller's own shipments.
+  sellerList: (params?: ListDisputesParams) =>
+    api.get<Paginated<Dispute>>('/disputes/seller', {
+      params: params as QueryParams,
+    }),
   byId: (id: string) => api.get<DisputeWithOrder>(`/disputes/${id}`),
   create: (body: CreateDisputeInput) => api.post<Dispute>('/disputes', body),
   // One shared thread endpoint for both sides — the backend decides who
@@ -26,7 +31,9 @@ export const disputeApi = {
     api.post<DisputeComment>(`/disputes/${id}/comments`, body),
   // ADMIN only — every dispute, not just the caller's own.
   adminList: (params?: ListDisputesParams) =>
-    api.get<Dispute[]>('/admin/disputes', { params: params as QueryParams }),
+    api.get<Paginated<Dispute>>('/admin/disputes', {
+      params: params as QueryParams,
+    }),
   adminResolve: (id: string, body: ResolveDisputeInput) =>
     api.patch<Dispute>(`/admin/disputes/${id}`, body),
 };
@@ -35,6 +42,9 @@ export const disputeKeys = {
   all: ['disputes'] as const,
   list: (params?: ListDisputesParams) =>
     [...disputeKeys.all, 'list', params ?? {}] as const,
+  sellerLists: () => [...disputeKeys.all, 'seller-list'] as const,
+  sellerList: (params?: ListDisputesParams) =>
+    [...disputeKeys.sellerLists(), params ?? {}] as const,
   detail: (id: string) => [...disputeKeys.all, 'detail', id] as const,
   comments: (id: string) => [...disputeKeys.all, 'comments', id] as const,
   adminLists: () => [...disputeKeys.all, 'admin-list'] as const,

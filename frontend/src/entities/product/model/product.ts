@@ -84,7 +84,15 @@ export interface ModerateProductInput {
   note: string;
 }
 
-export interface AdminListProductsParams {
+export interface PageParams {
+  page?: number;
+  limit?: number;
+  search?: string;
+}
+
+export interface AdminListProductsParams extends PageParams {
   status?: ProductStatus;
   sellerId?: string;
 }
+
+export type ListOwnProductsParams = PageParams & { status?: ProductStatus };

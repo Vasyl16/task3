@@ -26,6 +26,9 @@ export interface CreateDisputeInput {
 export interface ListDisputesParams {
   status?: DisputeStatus;
   sellerOrderId?: string;
+  search?: string;
+  page?: number;
+  limit?: number;
 }
 
 export interface ResolveDisputeInput {

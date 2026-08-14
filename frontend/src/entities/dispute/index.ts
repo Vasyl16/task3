@@ -13,6 +13,7 @@ export {
   useDisputes,
   useDispute,
   useAdminDisputes,
+  useSellerDisputes,
   useDisputeComments,
 } from './model/use-disputes';
 export { DisputeStatusBadge } from './ui/dispute-status-badge';

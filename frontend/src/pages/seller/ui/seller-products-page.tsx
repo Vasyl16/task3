@@ -1,4 +1,4 @@
-import type { CSSProperties } from 'react';
+import { useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
 import { ProductStatusBadge, useMyProducts } from '../../../entities/product';
 import { RestoreProductButton } from '../../../features/seller-products';
@@ -11,6 +11,7 @@ import {
   ErrorState,
   PageHeader,
   PageSpinner,
+  Pagination,
   Table,
 } from '../../../shared/ui';
 
@@ -18,14 +19,16 @@ export function SellerProductsPage() {
   // No sellerId needed any more: /products/mine resolves the seller from
   // the authenticated caller's own approved profile, so there is nothing
   // for a client to get wrong or point at someone else.
+  const [page, setPage] = useState(1);
   const {
-    data: products,
+    data,
     error,
     isPending,
     refetch,
     // Own catalogue, ARCHIVED included — otherwise a seller can never
     // find a listing they took down, let alone put it back.
-  } = useMyProducts();
+  } = useMyProducts({ page });
+  const products = data?.items;
 
   return (
     <div>
@@ -88,6 +91,15 @@ export function SellerProductsPage() {
             ))}
           </tbody>
         </Table>
+      )}
+
+      {data && (
+        <Pagination
+          page={data.page}
+          limit={data.limit}
+          total={data.total}
+          onPageChange={setPage}
+        />
       )}
     </div>
   );

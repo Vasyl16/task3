@@ -9,6 +9,7 @@ import {
   EmptyState,
   ErrorState,
   PageSpinner,
+  Pagination,
   Select,
   Table,
 } from '../../../shared/ui';
@@ -28,12 +29,12 @@ const STATUSES: DisputeStatus[] = [
 export function AdminDisputesPage() {
   const [status, setStatus] = useState<DisputeStatus | ''>('OPEN');
   const [expanded, setExpanded] = useState<string | null>(null);
-  const {
-    data: disputes,
-    error,
-    isPending,
-    refetch,
-  } = useAdminDisputes(status ? { status } : undefined);
+  const [page, setPage] = useState(1);
+  const { data, error, isPending, refetch } = useAdminDisputes({
+    ...(status ? { status } : {}),
+    page,
+  });
+  const disputes = data?.items;
 
   return (
     <div>
@@ -41,9 +42,10 @@ export function AdminDisputesPage() {
         <Select
           label="Status"
           value={status}
-          onChange={(event) =>
-            setStatus(event.target.value as DisputeStatus | '')
-          }
+          onChange={(event) => {
+            setStatus(event.target.value as DisputeStatus | '');
+            setPage(1);
+          }}
         >
           <option value="">All</option>
           {STATUSES.map((option) => (
@@ -123,6 +125,15 @@ export function AdminDisputesPage() {
             ))}
           </tbody>
         </Table>
+      )}
+
+      {data && (
+        <Pagination
+          page={data.page}
+          limit={data.limit}
+          total={data.total}
+          onPageChange={setPage}
+        />
       )}
     </div>
   );

@@ -96,3 +96,11 @@ export const SELLER_ORDER_NEXT_STATUS: Record<
   CANCELLED: [],
   REFUNDED: [],
 };
+
+export interface AdminListOrdersParams {
+  status?: OrderStatus;
+  buyerId?: string;
+  search?: string;
+  page?: number;
+  limit?: number;
+}

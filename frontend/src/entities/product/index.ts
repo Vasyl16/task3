@@ -1,4 +1,6 @@
 export type {
+  ListOwnProductsParams,
+  PageParams,
   Product,
   ProductStatus,
   ProductType,

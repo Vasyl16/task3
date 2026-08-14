@@ -2,8 +2,8 @@ import { useQuery } from '@tanstack/react-query';
 import { productApi, productKeys } from '../api/product-api';
 import type {
   AdminListProductsParams,
+  ListOwnProductsParams,
   ListProductsParams,
-  ProductStatus,
 } from './product';
 
 export function useProducts(params?: ListProductsParams) {
@@ -29,7 +29,7 @@ export function useAdminProducts(params?: AdminListProductsParams) {
 }
 
 // A seller's own listings in every state, archived included.
-export function useMyProducts(params?: { status?: ProductStatus }) {
+export function useMyProducts(params?: ListOwnProductsParams) {
   return useQuery({
     queryKey: productKeys.own(params),
     queryFn: () => productApi.listOwn(params),

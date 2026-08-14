@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { DisputeStatusBadge, useDisputes } from '../../../entities/dispute';
 import { paths } from '../../../app/routes/paths';
@@ -7,13 +8,16 @@ import {
   ErrorState,
   PageHeader,
   PageSpinner,
+  Pagination,
   Table,
 } from '../../../shared/ui';
 
 // The customer's own disputes. Scoped server-side to the caller — there
 // is no filter here that could widen it to somebody else's.
 export function DisputesPage() {
-  const { data: disputes, error, isPending, refetch } = useDisputes();
+  const [page, setPage] = useState(1);
+  const { data, error, isPending, refetch } = useDisputes({ page });
+  const disputes = data?.items;
 
   return (
     <div>
@@ -59,6 +63,15 @@ export function DisputesPage() {
             ))}
           </tbody>
         </Table>
+      )}
+
+      {data && (
+        <Pagination
+          page={data.page}
+          limit={data.limit}
+          total={data.total}
+          onPageChange={setPage}
+        />
       )}
     </div>
   );

@@ -16,8 +16,10 @@ import {
   ErrorState,
   PageHeader,
   PageSpinner,
+  Pagination,
   Select,
   Table,
+  TextField,
 } from '../../../shared/ui';
 
 const STATUSES: OrderStatus[] = [
@@ -35,13 +37,15 @@ const STATUSES: OrderStatus[] = [
 // different set of rules for admins to slip through.
 export function AdminOrdersPage() {
   const [status, setStatus] = useState<OrderStatus | ''>('');
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
   const [expanded, setExpanded] = useState<string | null>(null);
-  const {
-    data: orders,
-    error,
-    isPending,
-    refetch,
-  } = useAdminOrders(status ? { status } : undefined);
+  const { data, error, isPending, refetch } = useAdminOrders({
+    ...(status ? { status } : {}),
+    ...(search.trim() ? { search: search.trim() } : {}),
+    page,
+  });
+  const orders = data?.items;
 
   return (
     <div>
@@ -50,21 +54,45 @@ export function AdminOrdersPage() {
         subtitle="Every order on the platform. Expand one to act on a seller's shipment."
       />
 
-      <div style={{ maxWidth: '16rem', marginBottom: 'var(--space-3)' }}>
-        <Select
-          label="Status"
-          value={status}
-          onChange={(event) =>
-            setStatus(event.target.value as OrderStatus | '')
-          }
-        >
-          <option value="">All statuses</option>
-          {STATUSES.map((value) => (
-            <option key={value} value={value}>
-              {value}
-            </option>
-          ))}
-        </Select>
+      <div
+        style={{
+          marginBottom: 'var(--space-3)',
+          display: 'flex',
+          gap: 'var(--space-3)',
+          flexWrap: 'wrap',
+          alignItems: 'flex-end',
+        }}
+      >
+        <div style={{ minWidth: '20rem', flex: '1 1 20rem' }}>
+          <TextField
+            label="Search"
+            value={search}
+            onChange={(event) => {
+              setSearch(event.target.value);
+              setPage(1);
+            }}
+            // Matches the order id, the buyer, or a product in it — the
+            // three things someone chasing an order actually has.
+            placeholder="Order id, buyer email or product name"
+          />
+        </div>
+        <div style={{ maxWidth: '16rem' }}>
+          <Select
+            label="Status"
+            value={status}
+            onChange={(event) => {
+              setStatus(event.target.value as OrderStatus | '');
+              setPage(1);
+            }}
+          >
+            <option value="">All statuses</option>
+            {STATUSES.map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </Select>
+        </div>
       </div>
 
       {isPending && <PageSpinner label="Loading orders" />}
@@ -73,7 +101,11 @@ export function AdminOrdersPage() {
       {orders && orders.length === 0 && (
         <EmptyState
           title="No orders"
-          description="Nothing matches this filter."
+          description={
+            search.trim()
+              ? `Nothing matches “${search.trim()}”.`
+              : 'Nothing matches this filter.'
+          }
         />
       )}
 
@@ -142,6 +174,7 @@ export function AdminOrdersPage() {
                               <SellerOrderStatusControl
                                 sellerOrderId={sellerOrder.id}
                                 status={sellerOrder.status}
+                                isAdmin
                               />
                             </div>
                           </Card>
@@ -154,6 +187,15 @@ export function AdminOrdersPage() {
             ))}
           </tbody>
         </Table>
+      )}
+
+      {data && (
+        <Pagination
+          page={data.page}
+          limit={data.limit}
+          total={data.total}
+          onPageChange={setPage}
+        />
       )}
     </div>
   );
