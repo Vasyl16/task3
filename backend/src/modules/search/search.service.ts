@@ -67,7 +67,11 @@ export class SearchService {
           categoryName: hit.categoryName,
           sellerId: hit.sellerId,
           sellerName: hit.sellerName,
-          sellerRating: hit.sellerRating,
+          // ?? null, because a document indexed before ratings existed
+          // has no such field and would otherwise return undefined —
+          // which JSON drops entirely, breaking the `number | null`
+          // contract the client codes against.
+          productRating: hit.productRating ?? null,
           type: hit.type,
           inStock: hit.inStock,
           // ?? false: a document indexed before this field existed
@@ -102,7 +106,7 @@ export class SearchService {
     if (query.maxPrice !== undefined)
       clauses.push(`basePrice <= ${query.maxPrice}`);
     if (query.minRating !== undefined)
-      clauses.push(`sellerRating >= ${query.minRating}`);
+      clauses.push(`productRating >= ${query.minRating}`);
     if (query.inStockOnly) clauses.push('inStock = true');
     return clauses;
   }
@@ -122,7 +126,7 @@ export class SearchService {
     > = {
       [SearchSortBy.PRICE]: 'basePrice',
       [SearchSortBy.NEWEST]: 'createdAt',
-      [SearchSortBy.RATING]: 'sellerRating',
+      [SearchSortBy.RATING]: 'productRating',
     };
     const defaultOrder: Record<
       Exclude<SearchSortBy, SearchSortBy.RELEVANCE>,

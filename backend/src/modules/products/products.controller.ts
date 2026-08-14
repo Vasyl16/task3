@@ -23,14 +23,16 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { UserRole } from '@prisma/client';
+import { ProductStatus, UserRole } from '@prisma/client';
 import { ApiAuth } from '../../core/openapi/api-auth.decorator';
 import { CurrentUser } from '../../core/auth/decorators/current-user.decorator';
 import { Public } from '../../core/auth/decorators/public.decorator';
 import { Roles } from '../../core/auth/decorators/roles.decorator';
 import type { AuthenticatedUser } from '../../core/auth/authenticated-user.interface';
 import { productImageMulterOptions } from './infrastructure/product-image.multer-config';
-import { ProductsService } from './products.service';
+import { ListCatalogQuery } from './dto/list-catalog.query';
+import { ListOwnProductsQuery } from './dto/list-own-products.query';
+import { PRODUCT_SORTS, ProductsService } from './products.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 
@@ -54,11 +56,36 @@ export class ProductsController {
   })
   @ApiQuery({ name: 'categoryId', required: false })
   @ApiQuery({ name: 'sellerId', required: false })
-  findAll(
-    @Query('categoryId') categoryId?: string,
-    @Query('sellerId') sellerId?: string,
+  @ApiQuery({
+    name: 'sort',
+    required: false,
+    enum: PRODUCT_SORTS,
+    description:
+      "'rating' orders by average review score, ties broken by review " +
+      "count then recency. Defaults to 'newest'.",
+  })
+  findAll(@Query() query: ListCatalogQuery) {
+    return this.productsService.findAllForCatalog(query);
+  }
+
+  // Registered before ':id' so "mine" is not matched as a product id.
+  @Roles(UserRole.SELLER)
+  @Get('mine')
+  @ApiAuth(UserRole.SELLER)
+  @ApiOperation({
+    summary: 'Your own products, INCLUDING archived ones',
+    description:
+      'The public catalogue hides archived products, which left a seller ' +
+      'unable to find one they had taken down. This lists the caller’s ' +
+      'own listings in every state so they can be restored. Scoped to ' +
+      'your own approved seller profile — there is no sellerId parameter.',
+  })
+  @ApiQuery({ name: 'status', required: false, enum: ProductStatus })
+  listOwn(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ListOwnProductsQuery,
   ) {
-    return this.productsService.findAllForCatalog({ categoryId, sellerId });
+    return this.productsService.listOwnProducts(user.id, query);
   }
 
   @Public()
@@ -151,6 +178,23 @@ export class ProductsController {
   // multipart/form-data, field name "image"; validated by
   // productImageMulterOptions (type + 5MB size) before this handler ever
   // runs.
+  @Roles(UserRole.SELLER, UserRole.ADMIN)
+  @Post(':id/restore')
+  @ApiAuth(UserRole.SELLER, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Put an archived listing back on sale',
+    description:
+      'The inverse of archiving. Re-indexes the product for search, ' +
+      'which dropped it when it was archived. A listing removed by a ' +
+      'MODERATOR cannot be restored this way — that stays an admin ' +
+      'decision, or takedowns would mean nothing.',
+  })
+  @ApiResponse({ status: 403, description: 'Not yours, or an admin takedown.' })
+  @ApiResponse({ status: 409, description: 'The product is not archived.' })
+  restore(@Param('id') id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.productsService.restore(id, user);
+  }
+
   @Roles(UserRole.SELLER, UserRole.ADMIN)
   @Post(':id/image')
   @ApiAuth(UserRole.SELLER, UserRole.ADMIN)

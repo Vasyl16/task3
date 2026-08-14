@@ -120,7 +120,7 @@ describe('SearchSyncConsumer', () => {
           name: 'Widget',
           categoryName: 'Gadgets',
           sellerName: 'Acme',
-          sellerRating: 4.5,
+          productRating: 4.5,
           inStock: true, // 10 available - 2 reserved > 0
         }),
       ],

@@ -60,11 +60,11 @@ export class MeilisearchService {
           'categoryId',
           'sellerId',
           'basePrice',
-          'sellerRating',
+          'productRating',
           'inStock',
           'type',
         ],
-        sortableAttributes: ['basePrice', 'createdAt', 'sellerRating'],
+        sortableAttributes: ['basePrice', 'createdAt', 'productRating'],
       });
     } catch (err) {
       this.logger.warn(

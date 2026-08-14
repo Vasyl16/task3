@@ -23,6 +23,7 @@ import { CartModule } from './modules/cart/cart.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { BiddingModule } from './modules/bidding/bidding.module';
 import { PaymentsLedgerModule } from './modules/payments-ledger/payments-ledger.module';
+import { ReviewsModule } from './modules/reviews/reviews.module';
 import { DisputesModule } from './modules/disputes/disputes.module';
 import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
@@ -73,6 +74,7 @@ import { AdminModule } from './modules/admin/admin.module';
     OrdersModule,
     PaymentsLedgerModule,
     DisputesModule,
+    ReviewsModule,
     SearchModule,
     AnalyticsModule,
     NotificationsModule,

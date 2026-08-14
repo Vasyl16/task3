@@ -1,5 +1,5 @@
 // The Meilisearch read-model document for a Product — deliberately
-// denormalized (categoryName, sellerName, sellerRating) so search
+// denormalized (categoryName, sellerName, productRating) so search
 // queries never need a join. Rebuilt from PostgreSQL (the source of
 // truth) on every ProductCreated/ProductUpdated event; only ACTIVE
 // products are ever indexed — ProductArchived removes the document
@@ -17,7 +17,7 @@ export interface ProductSearchDocument {
   // there is no stored per-product or per-seller rating aggregate in
   // Postgres (see SKILL.md scope notes), so this is null until the
   // seller has at least one review.
-  sellerRating: number | null;
+  productRating: number | null;
   type: string;
   inStock: boolean;
   quantityAvailable: number;

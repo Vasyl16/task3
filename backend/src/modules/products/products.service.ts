@@ -18,6 +18,7 @@ import type { AuthenticatedUser } from '../../core/auth/authenticated-user.inter
 import { CorrelationIdService } from '../../core/correlation-id/correlation-id.service';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service';
 import { OutboxService } from '../../infrastructure/outbox/outbox.service';
+import { ReviewsService } from '../reviews/reviews.service';
 import { CategoriesService } from '../categories/categories.service';
 import { SellersService } from '../sellers/sellers.service';
 import {
@@ -42,14 +43,31 @@ import {
 export type CatalogProduct = Omit<
   Product,
   'moderatedByUserId' | 'moderatedAt' | 'moderationNote'
->;
+> & {
+  // Derived on read from the Review rows, never stored on Product. A
+  // product nobody has reviewed reports 0/0 rather than null, so the
+  // frontend has one shape to render instead of two.
+  ratingAverage: number;
+  ratingCount: number;
+};
+
+// How the catalogue is ordered. Rating sorting is a real business
+// request ("show me the best-reviewed things"), so it is an explicit,
+// validated option rather than a free-text orderBy the client controls —
+// passing a client string straight to Prisma's orderBy would let it sort
+// by columns the catalogue deliberately does not expose.
+export const PRODUCT_SORTS = ['newest', 'rating'] as const;
+export type ProductSort = (typeof PRODUCT_SORTS)[number];
 
 // Built by listing what IS public rather than deleting what isn't. The
 // difference matters: a sensitive column added to Product later is
 // excluded from this response by default and has to be opted in
 // deliberately, whereas a blocklist would start leaking it the moment it
 // was added — which is exactly how the moderation fields got out.
-function toCatalogProduct(product: Product): CatalogProduct {
+function toCatalogProduct(
+  product: Product,
+  rating: { average: number; count: number } = { average: 0, count: 0 },
+): CatalogProduct {
   return {
     id: product.id,
     sellerId: product.sellerId,
@@ -63,6 +81,8 @@ function toCatalogProduct(product: Product): CatalogProduct {
     status: product.status,
     createdAt: product.createdAt,
     updatedAt: product.updatedAt,
+    ratingAverage: rating.average,
+    ratingCount: rating.count,
   };
 }
 
@@ -76,6 +96,7 @@ export class ProductsService {
     private readonly categoriesService: CategoriesService,
     private readonly outboxService: OutboxService,
     private readonly correlationIdService: CorrelationIdService,
+    private readonly reviewsService: ReviewsService,
     // Used only to open the transaction boundary below — every actual
     // read/write still goes through ProductsRepository, keeping Prisma
     // details out of the rest of the service.
@@ -111,12 +132,41 @@ export class ProductsService {
   async findAllForCatalog(filter?: {
     categoryId?: string;
     sellerId?: string;
+    sort?: ProductSort;
   }): Promise<CatalogProduct[]> {
-    return (await this.findAll(filter)).map(toCatalogProduct);
+    const products = await this.findAll(filter);
+    const ratings = await this.reviewsService.getRatingsFor(
+      products.map((p) => p.id),
+    );
+
+    const catalog = products.map((product) =>
+      toCatalogProduct(product, ratings.get(product.id)),
+    );
+
+    // Sorted here rather than in SQL because the rating is not a column
+    // on Product — it is an aggregate over another table, computed per
+    // request. The repository has already applied the default ordering,
+    // so this only reorders when explicitly asked. If the catalogue ever
+    // grows pagination, this has to move into the query: sorting a page
+    // after it has been selected sorts the wrong rows.
+    if (filter?.sort === 'rating') {
+      catalog.sort(
+        (a, b) =>
+          b.ratingAverage - a.ratingAverage ||
+          // Ties broken by how many people said it: 5.0 from forty
+          // buyers outranks 5.0 from one.
+          b.ratingCount - a.ratingCount ||
+          b.createdAt.getTime() - a.createdAt.getTime(),
+      );
+    }
+
+    return catalog;
   }
 
   async findByIdForCatalog(id: string): Promise<CatalogProduct> {
-    return toCatalogProduct(await this.findById(id));
+    const product = await this.findById(id);
+    const rating = await this.reviewsService.getRatingFor(id);
+    return toCatalogProduct(product, rating);
   }
 
   // Reference implementation of the strong-consistency + outbox pattern:
@@ -275,6 +325,57 @@ export class ProductsService {
     });
   }
 
+  // A seller's OWN catalogue, including ARCHIVED. The public listing
+  // hides archived products by design, which left a seller unable to
+  // find — let alone restore — something they had taken down. Scoped to
+  // the caller's own approved profile, never a client-supplied sellerId.
+  async listOwnProducts(
+    callerId: string,
+    filter?: { status?: ProductStatus },
+  ): Promise<Product[]> {
+    const sellerProfile =
+      await this.sellersService.getOwnApprovedSellerProfileOrThrow(callerId);
+    return this.productsRepository.findForModeration({
+      sellerId: sellerProfile.id,
+      status: filter?.status,
+    });
+  }
+
+  // Puts an archived listing back on sale. The mirror of archive():
+  // status returns to ACTIVE and a ProductUpdated event re-indexes it,
+  // since search-sync DELETED the document when it was archived.
+  //
+  // Deliberately NOT allowed to resurrect a product an ADMIN took down —
+  // that is a moderation decision, and letting a seller undo it from
+  // their own dashboard would make takedowns meaningless. Those carry a
+  // moderatedAt stamp; reinstating them stays on AdminController.
+  async restore(id: string, caller: AuthenticatedUser): Promise<Product> {
+    const product = await this.findById(id);
+    await this.assertOwnsProductOrIsAdmin(product, caller);
+
+    if (product.status !== ProductStatus.ARCHIVED) {
+      throw new ConflictException(`Product ${id} is not archived`);
+    }
+    if (product.moderatedAt && caller.role !== UserRole.ADMIN) {
+      throw new ForbiddenException(
+        'This listing was removed by a moderator and can only be reinstated by an admin',
+      );
+    }
+
+    const correlationId = this.correlationIdService.getId() ?? randomUUID();
+    return this.prisma.$transaction(async (tx) => {
+      const restored = await this.productsRepository.restore(tx, id);
+      await this.outboxService.record(tx, {
+        aggregateType: 'Product',
+        aggregateId: restored.id,
+        eventType: PRODUCT_UPDATED_EVENT,
+        payload: { productId: restored.id },
+        correlationId,
+      });
+      return restored;
+    });
+  }
+
   // ===================== Moderation (admin) =====================
   // Admin-only; @Roles(ADMIN) is enforced on AdminController, and every
   // method here takes the moderator's id from the authenticated caller.
@@ -363,12 +464,15 @@ export class ProductsService {
     return this.productsRepository.findManyWithInventory(tx, productIds);
   }
 
-  async decrementStockForCheckout(
+  // Checkout MOVES units into quantityReserved — they leave
+  // quantityAvailable immediately, so a seller's stock figure reflects
+  // what is genuinely still sellable. See ProductsRepository.reserveStock.
+  async reserveStockForCheckout(
     tx: Prisma.TransactionClient,
     productId: string,
     quantity: number,
   ): Promise<void> {
-    const inventory = await this.productsRepository.decrementStock(
+    const inventory = await this.productsRepository.reserveStock(
       tx,
       productId,
       quantity,
@@ -381,16 +485,63 @@ export class ProductsService {
     await this.recordInventoryUpdated(tx, inventory, 'CHECKOUT');
   }
 
-  async restoreStock(
+  // The seller shipped: the units leave for good, so the hold is
+  // consumed. quantityAvailable is untouched — it already came down at
+  // checkout.
+  //
+  // Returns whether it actually applied. A null result means the
+  // reservation was not there to convert — a ship transition that ran
+  // twice, or an order whose units were released by an earlier
+  // cancellation — and that is a no-op, not an error: failing here would
+  // block a legitimate status change over inventory bookkeeping that is
+  // already in the desired state.
+  async commitReservationForShipment(
     tx: Prisma.TransactionClient,
     productId: string,
     quantity: number,
-  ): Promise<void> {
-    const inventory = await this.productsRepository.restoreStock(
+  ): Promise<boolean> {
+    const inventory = await this.productsRepository.commitReservation(
       tx,
       productId,
       quantity,
     );
+    if (!inventory) {
+      this.logger.warn({
+        event: 'inventory.commit_skipped',
+        entityType: 'Product',
+        entityId: productId,
+        quantity,
+      });
+      return false;
+    }
+    await this.recordInventoryUpdated(tx, inventory, 'SHIPMENT');
+    return true;
+  }
+
+  // A cancelled order puts its units back on sale — the exact inverse of
+  // the reservation taken at checkout.
+  async releaseReservationForCancellation(
+    tx: Prisma.TransactionClient,
+    productId: string,
+    quantity: number,
+  ): Promise<void> {
+    const inventory = await this.productsRepository.releaseReservation(
+      tx,
+      productId,
+      quantity,
+    );
+    if (!inventory) {
+      // Nothing held — a release that already happened. Not an error:
+      // failing here would block a legitimate cancellation over
+      // bookkeeping that is already in the desired state.
+      this.logger.warn({
+        event: 'inventory.release_skipped',
+        entityType: 'Product',
+        entityId: productId,
+        quantity,
+      });
+      return;
+    }
     await this.recordInventoryUpdated(tx, inventory, 'CANCELLATION');
   }
 
@@ -427,6 +578,15 @@ export class ProductsService {
       productId,
       quantity,
     );
+    if (!inventory) {
+      this.logger.warn({
+        event: 'inventory.release_skipped',
+        entityType: 'Product',
+        entityId: productId,
+        quantity,
+      });
+      return;
+    }
     await this.recordInventoryUpdated(tx, inventory, 'AUCTION_RELEASE');
   }
 

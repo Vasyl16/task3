@@ -109,8 +109,12 @@ export class SearchSyncConsumer extends DomainEventConsumer {
         tx.category.findUniqueOrThrow({ where: { id: product.categoryId } }),
         tx.sellerProfile.findUniqueOrThrow({ where: { id: product.sellerId } }),
         tx.inventory.findUnique({ where: { productId } }),
+        // The PRODUCT's own rating, not the seller's average across
+        // their catalogue. A shopper reading a rating on a listing is
+        // asking about that item; rolling every product a seller lists
+        // into one number would let a strong line carry a weak one.
         tx.review.aggregate({
-          where: { sellerId: product.sellerId },
+          where: { productId },
           _avg: { rating: true },
         }),
         // Only ever relevant for AUCTION products, but cheap enough to
@@ -132,12 +136,12 @@ export class SearchSyncConsumer extends DomainEventConsumer {
       categoryName: category.name,
       sellerId: product.sellerId,
       sellerName: seller.businessName,
-      sellerRating: ratingAgg._avg.rating,
+      productRating: ratingAgg._avg.rating,
       type: product.type,
-      inStock:
-        (inventory?.quantityAvailable ?? 0) -
-          (inventory?.quantityReserved ?? 0) >
-        0,
+      // quantityAvailable alone: reserved units have already been moved
+      // out of it, so subtracting them again would mark a product out of
+      // stock while it still has sellable units.
+      inStock: (inventory?.quantityAvailable ?? 0) > 0,
       quantityAvailable: inventory?.quantityAvailable ?? 0,
       hasActiveAuction: hasActiveAuction > 0,
       createdAt: product.createdAt.getTime(),

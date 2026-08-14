@@ -7,7 +7,7 @@ export interface SearchResultItem {
   categoryName: string;
   sellerId: string;
   sellerName: string;
-  sellerRating: number | null;
+  productRating: number | null;
   type: string;
   inStock: boolean;
   hasActiveAuction: boolean;

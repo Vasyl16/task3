@@ -87,7 +87,7 @@ describe('SearchService', () => {
     it('builds a minRating filter clause', async () => {
       await searchService.search(query({ minRating: 4 }));
       const [, opts] = search.mock.calls[0];
-      expect(opts.filter).toContain('sellerRating >= 4');
+      expect(opts.filter).toContain('productRating >= 4');
     });
 
     it('builds an inStock filter clause only when inStockOnly is true', async () => {
@@ -140,7 +140,7 @@ describe('SearchService', () => {
             categoryName: 'Gadgets',
             sellerId: 's1',
             sellerName: 'Acme',
-            sellerRating: 4.2,
+            productRating: 4.2,
             type: 'FIXED_PRICE',
             inStock: true,
             hasActiveAuction: false,
@@ -163,7 +163,7 @@ describe('SearchService', () => {
             categoryName: 'Gadgets',
             sellerId: 's1',
             sellerName: 'Acme',
-            sellerRating: 4.2,
+            productRating: 4.2,
             type: 'FIXED_PRICE',
             inStock: true,
             hasActiveAuction: false,
@@ -191,7 +191,7 @@ describe('SearchService', () => {
             categoryName: 'Gadgets',
             sellerId: 's1',
             sellerName: 'Acme',
-            sellerRating: 4.2,
+            productRating: 4.2,
             type: 'AUCTION',
             inStock: true,
             // hasActiveAuction deliberately omitted
@@ -230,7 +230,7 @@ describe('SearchService', () => {
 
     it('defaults rating sort to descending', async () => {
       await searchService.search(query({ sortBy: SearchSortBy.RATING }));
-      expect(search.mock.calls[0][1].sort).toEqual(['sellerRating:desc']);
+      expect(search.mock.calls[0][1].sort).toEqual(['productRating:desc']);
     });
 
     it('honors an explicit sortOrder override', async () => {

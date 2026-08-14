@@ -17,7 +17,9 @@ import { CategoriesService } from '../categories/categories.service';
 import { SellersService } from '../sellers/sellers.service';
 import { ProductsRepository } from './domain/products.repository';
 import { INVENTORY_UPDATED_EVENT } from './domain/events/inventory-updated.event';
+import { PRODUCT_UPDATED_EVENT } from './domain/events/product-updated.event';
 import { ProductsService } from './products.service';
+import { ReviewsService } from '../reviews/reviews.service';
 import { ProductModerationAction } from './dto/moderate-product.dto';
 
 const NOW = new Date();
@@ -106,11 +108,11 @@ describe('ProductsService', () => {
       createWithInventory: jest.fn(),
       update: jest.fn(),
       archive: jest.fn(),
+      restore: jest.fn(),
       findManyWithInventory: jest.fn(),
-      decrementStock: jest.fn(),
       reserveStock: jest.fn(),
+      commitReservation: jest.fn(),
       releaseReservation: jest.fn(),
-      restoreStock: jest.fn(),
       setStock: jest.fn(),
       findForModeration: jest.fn(),
       setModerationStatus: jest.fn(),
@@ -133,6 +135,20 @@ describe('ProductsService', () => {
         { provide: CategoriesService, useValue: categoriesService },
         { provide: OutboxService, useValue: outboxService },
         { provide: CorrelationIdService, useValue: correlationIdService },
+        {
+          // The catalogue projections enrich each product with its
+          // rating; these tests are about ownership and outbox writes,
+          // so an unreviewed catalogue is the right stand-in.
+          provide: ReviewsService,
+          useValue: {
+            getRatingsFor: jest.fn().mockResolvedValue(new Map()),
+            getRatingFor: jest
+              .fn()
+              .mockImplementation((productId: string) =>
+                Promise.resolve({ productId, average: 0, count: 0 }),
+              ),
+          },
+        },
         {
           provide: PrismaService,
           useValue: {
@@ -494,6 +510,91 @@ describe('ProductsService', () => {
     });
   });
 
+  describe('restore (seller un-archives their own listing)', () => {
+    it('puts an archived product back on sale and re-indexes it', async () => {
+      productsRepository.findById.mockResolvedValue(
+        buildProduct({ status: ProductStatus.ARCHIVED }),
+      );
+      sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue(
+        buildSellerProfile({ id: 'seller-profile-1' }),
+      );
+      productsRepository.restore.mockResolvedValue(
+        buildProduct({ status: ProductStatus.ACTIVE }),
+      );
+
+      const restored = await productsService.restore(
+        'product-1',
+        buildCaller({ id: 'seller-user' }),
+      );
+
+      expect(restored.status).toBe(ProductStatus.ACTIVE);
+      // Search-sync DELETED the document when it was archived, so the
+      // restore has to announce itself or the product stays unfindable.
+      expect(outboxService.record).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ eventType: PRODUCT_UPDATED_EVENT }),
+      );
+    });
+
+    it('rejects restoring a product that is not archived', async () => {
+      productsRepository.findById.mockResolvedValue(
+        buildProduct({ status: ProductStatus.ACTIVE }),
+      );
+      sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue(
+        buildSellerProfile({ id: 'seller-profile-1' }),
+      );
+
+      await expect(
+        productsService.restore(
+          'product-1',
+          buildCaller({ id: 'seller-user' }),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    // A takedown a seller could undo from their own dashboard would not
+    // be a takedown at all.
+    it('refuses to let a seller undo an ADMIN takedown', async () => {
+      productsRepository.findById.mockResolvedValue(
+        buildProduct({
+          status: ProductStatus.ARCHIVED,
+          moderatedAt: new Date(),
+          moderatedByUserId: 'admin-1',
+        }),
+      );
+      sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue(
+        buildSellerProfile({ id: 'seller-profile-1' }),
+      );
+
+      await expect(
+        productsService.restore(
+          'product-1',
+          buildCaller({ id: 'seller-user' }),
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(productsRepository.restore).not.toHaveBeenCalled();
+    });
+
+    it('but an ADMIN may reinstate their own takedown', async () => {
+      productsRepository.findById.mockResolvedValue(
+        buildProduct({
+          status: ProductStatus.ARCHIVED,
+          moderatedAt: new Date(),
+        }),
+      );
+      productsRepository.restore.mockResolvedValue(
+        buildProduct({ status: ProductStatus.ACTIVE }),
+      );
+
+      await expect(
+        productsService.restore(
+          'product-1',
+          buildCaller({ id: 'admin-1', role: UserRole.ADMIN }),
+        ),
+      ).resolves.toMatchObject({ status: ProductStatus.ACTIVE });
+    });
+  });
+
   describe('moderation', () => {
     const admin = buildCaller({ id: 'admin-1', role: UserRole.ADMIN });
 
@@ -666,27 +767,27 @@ describe('ProductsService', () => {
 
   describe('checkout support', () => {
     it('decrementStockForCheckout succeeds silently when stock is sufficient', async () => {
-      productsRepository.decrementStock.mockResolvedValue(buildInventory());
+      productsRepository.reserveStock.mockResolvedValue(buildInventory());
 
       await expect(
-        productsService.decrementStockForCheckout(
+        productsService.reserveStockForCheckout(
           fakeTx as never,
           'product-1',
           2,
         ),
       ).resolves.toBeUndefined();
-      expect(productsRepository.decrementStock).toHaveBeenCalledWith(
+      expect(productsRepository.reserveStock).toHaveBeenCalledWith(
         fakeTx,
         'product-1',
         2,
       );
     });
 
-    it('decrementStockForCheckout throws ConflictException when stock is insufficient', async () => {
-      productsRepository.decrementStock.mockResolvedValue(null);
+    it('reserveStockForCheckout throws ConflictException when stock is insufficient', async () => {
+      productsRepository.reserveStock.mockResolvedValue(null);
 
       await expect(
-        productsService.decrementStockForCheckout(
+        productsService.reserveStockForCheckout(
           fakeTx as never,
           'product-1',
           2,
@@ -694,16 +795,47 @@ describe('ProductsService', () => {
       ).rejects.toBeInstanceOf(ConflictException);
     });
 
-    it('restoreStock delegates to the repository with the given transaction', async () => {
-      productsRepository.restoreStock.mockResolvedValue(buildInventory());
+    it('releaseReservationForCancellation frees the hold rather than restocking', async () => {
+      productsRepository.releaseReservation.mockResolvedValue(buildInventory());
 
-      await productsService.restoreStock(fakeTx as never, 'product-1', 3);
+      await productsService.releaseReservationForCancellation(
+        fakeTx as never,
+        'product-1',
+        3,
+      );
 
-      expect(productsRepository.restoreStock).toHaveBeenCalledWith(
+      expect(productsRepository.releaseReservation).toHaveBeenCalledWith(
         fakeTx,
         'product-1',
         3,
       );
+    });
+
+    // Shipping is the only thing that reduces quantityAvailable now.
+    it('commitReservationForShipment converts the hold and reports that it applied', async () => {
+      productsRepository.commitReservation.mockResolvedValue(buildInventory());
+
+      await expect(
+        productsService.commitReservationForShipment(
+          fakeTx as never,
+          'product-1',
+          2,
+        ),
+      ).resolves.toBe(true);
+    });
+
+    // A re-run ship transition must not decrement a second time.
+    it('commitReservationForShipment is a no-op when the reservation is already gone', async () => {
+      productsRepository.commitReservation.mockResolvedValue(null);
+
+      await expect(
+        productsService.commitReservationForShipment(
+          fakeTx as never,
+          'product-1',
+          2,
+        ),
+      ).resolves.toBe(false);
+      expect(outboxService.record).not.toHaveBeenCalled();
     });
   });
 
@@ -788,8 +920,8 @@ describe('ProductsService', () => {
   // (so a rolled-back checkout announces nothing) and must carry the
   // post-change quantities, not the pre-change ones.
   describe('InventoryUpdated event', () => {
-    it('records the post-decrement quantities on the caller’s transaction, tagged CHECKOUT', async () => {
-      productsRepository.decrementStock.mockResolvedValue(
+    it('records the post-reservation quantities on the caller’s transaction, tagged CHECKOUT', async () => {
+      productsRepository.reserveStock.mockResolvedValue(
         buildInventory({
           quantityAvailable: 3,
           quantityReserved: 2,
@@ -797,7 +929,7 @@ describe('ProductsService', () => {
         }),
       );
 
-      await productsService.decrementStockForCheckout(
+      await productsService.reserveStockForCheckout(
         fakeTx as never,
         'product-1',
         2,
@@ -818,11 +950,11 @@ describe('ProductsService', () => {
       });
     });
 
-    it('records nothing when the decrement failed — a sold-out attempt changed no stock', async () => {
-      productsRepository.decrementStock.mockResolvedValue(null);
+    it('records nothing when the reservation failed — a sold-out attempt changed no stock', async () => {
+      productsRepository.reserveStock.mockResolvedValue(null);
 
       await expect(
-        productsService.decrementStockForCheckout(
+        productsService.reserveStockForCheckout(
           fakeTx as never,
           'product-1',
           2,
@@ -831,12 +963,16 @@ describe('ProductsService', () => {
       expect(outboxService.record).not.toHaveBeenCalled();
     });
 
-    it('tags a cancellation restore as CANCELLATION so subscribers can tell the two apart', async () => {
-      productsRepository.restoreStock.mockResolvedValue(
+    it('tags a cancellation release as CANCELLATION so subscribers can tell the two apart', async () => {
+      productsRepository.releaseReservation.mockResolvedValue(
         buildInventory({ quantityAvailable: 10, quantityReserved: 0 }),
       );
 
-      await productsService.restoreStock(fakeTx as never, 'product-1', 3);
+      await productsService.releaseReservationForCancellation(
+        fakeTx as never,
+        'product-1',
+        3,
+      );
 
       const [, event] = outboxService.record.mock.calls[0];
       expect(event.eventType).toBe(INVENTORY_UPDATED_EVENT);
