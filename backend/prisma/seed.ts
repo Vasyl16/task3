@@ -81,6 +81,7 @@ interface ProductSearchDocument {
   type: string;
   inStock: boolean;
   quantityAvailable: number;
+  hasActiveAuction: boolean;
   createdAt: number;
 }
 
@@ -136,15 +137,24 @@ async function syncProductToSearch(productId: string): Promise<void> {
     return;
   }
 
-  const [category, seller, inventory, ratingAgg] = await Promise.all([
-    prisma.category.findUniqueOrThrow({ where: { id: product.categoryId } }),
-    prisma.sellerProfile.findUniqueOrThrow({ where: { id: product.sellerId } }),
-    prisma.inventory.findUnique({ where: { productId } }),
-    prisma.review.aggregate({
-      where: { productId },
-      _avg: { rating: true },
-    }),
-  ]);
+  const [category, seller, inventory, ratingAgg, hasActiveAuction] =
+    await Promise.all([
+      prisma.category.findUniqueOrThrow({ where: { id: product.categoryId } }),
+      prisma.sellerProfile.findUniqueOrThrow({
+        where: { id: product.sellerId },
+      }),
+      prisma.inventory.findUnique({ where: { productId } }),
+      prisma.review.aggregate({
+        where: { productId },
+        _avg: { rating: true },
+      }),
+      // See SearchSyncConsumer: SCHEDULED counts too — a bidder can see
+      // and prepare for an auction before it opens, so it isn't "ended"
+      // in the sense this flag exists to signal.
+      prisma.auction.count({
+        where: { productId, status: { in: ['ACTIVE', 'SCHEDULED'] } },
+      }),
+    ]);
 
   const doc: ProductSearchDocument = {
     id: product.id,
@@ -161,6 +171,7 @@ async function syncProductToSearch(productId: string): Promise<void> {
     // quantityAvailable, so no subtraction here either.
     inStock: (inventory?.quantityAvailable ?? 0) > 0,
     quantityAvailable: inventory?.quantityAvailable ?? 0,
+    hasActiveAuction: hasActiveAuction > 0,
     createdAt: product.createdAt.getTime(),
   };
 
