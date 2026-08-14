@@ -15,23 +15,26 @@ interface AuctionSnapshotState {
   startingPrice: string;
   minBidIncrement: string;
   currentHighestBid: string | null;
-  currentHighestBidderId: string | null;
   version: number;
   startsAt: string;
   endsAt: string;
   checkoutDeadline: string | null;
 }
 
+// No bidderId / winningBidderId: an auction room broadcasts to everyone
+// watching the lot, so the backend strips bidder identities before they
+// go out (see RealtimeConsumer.withoutBidderIdentity). Whether the
+// VIEWER holds the top bid is per-caller and comes from the REST
+// projection instead — which is why every handler below re-fetches the
+// auction rather than trying to patch that flag from a broadcast.
 interface BidUpdatedPayload {
   auctionId: string;
   bidId: string;
-  bidderId: string;
   amount: number;
 }
 
 interface AuctionEndedPayload {
   auctionId: string;
-  winningBidderId: string | null;
   winningAmount: string | null;
 }
 
@@ -56,13 +59,17 @@ export function useAuctionRealtime(auctionId: string | null) {
             ...current,
             status: state.status,
             currentHighestBid: state.currentHighestBid,
-            currentHighestBidderId: state.currentHighestBidderId,
             version: state.version,
             checkoutDeadline: state.checkoutDeadline,
           },
       );
       void queryClient.invalidateQueries({
         queryKey: auctionKeys.bids(state.auctionId),
+      });
+      // viewerIsHighestBidder cannot be derived from a room broadcast,
+      // so refresh it from the per-caller endpoint.
+      void queryClient.invalidateQueries({
+        queryKey: auctionKeys.detail(state.auctionId),
       });
     },
     onEvent: (eventName, payload) => {
@@ -74,11 +81,15 @@ export function useAuctionRealtime(auctionId: string | null) {
             current && {
               ...current,
               currentHighestBid: String(bidPayload.amount),
-              currentHighestBidderId: bidPayload.bidderId,
             },
         );
         void queryClient.invalidateQueries({
           queryKey: auctionKeys.bids(bidPayload.auctionId),
+        });
+        // A new top bid may have just taken the lead away from — or
+        // handed it to — this viewer. Only the per-caller endpoint knows.
+        void queryClient.invalidateQueries({
+          queryKey: auctionKeys.detail(bidPayload.auctionId),
         });
       } else {
         const endedPayload = payload as AuctionEndedPayload;
@@ -88,11 +99,14 @@ export function useAuctionRealtime(auctionId: string | null) {
             current && {
               ...current,
               status: 'ENDED',
-              currentHighestBidderId: endedPayload.winningBidderId,
               currentHighestBid:
                 endedPayload.winningAmount ?? current.currentHighestBid,
             },
         );
+        // Whether this viewer won is, again, per-caller.
+        void queryClient.invalidateQueries({
+          queryKey: auctionKeys.detail(endedPayload.auctionId),
+        });
       }
     },
   });

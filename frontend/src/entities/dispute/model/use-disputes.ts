@@ -23,3 +23,11 @@ export function useAdminDisputes(params?: ListDisputesParams) {
     queryFn: () => disputeApi.adminList(params),
   });
 }
+
+export function useDisputeComments(disputeId: string | undefined) {
+  return useQuery({
+    queryKey: disputeKeys.comments(disputeId ?? ''),
+    queryFn: () => disputeApi.comments(disputeId as string),
+    enabled: Boolean(disputeId),
+  });
+}

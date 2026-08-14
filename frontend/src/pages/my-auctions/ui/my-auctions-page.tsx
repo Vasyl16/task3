@@ -22,8 +22,8 @@ import {
 // the only two outcomes for a bidder are Won/Lost — COMPLETED (checked
 // out) is shown via its own status badge instead, since "Won" alone
 // would hide that the order was already placed.
-function myOutcome(auction: Auction, userId: string): string | null {
-  const isHighBidder = auction.currentHighestBidderId === userId;
+function myOutcome(auction: Auction): string | null {
+  const isHighBidder = auction.viewerIsHighestBidder;
   switch (auction.status) {
     case 'ACTIVE':
     case 'SCHEDULED':
@@ -79,7 +79,7 @@ export function MyAuctionsPage() {
           </thead>
           <tbody>
             {auctions.map((auction, index) => {
-              const outcome = myOutcome(auction, user.id);
+              const outcome = myOutcome(auction);
               return (
                 <tr key={auction.id}>
                   <td>

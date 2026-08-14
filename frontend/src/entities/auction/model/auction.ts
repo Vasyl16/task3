@@ -11,7 +11,11 @@ export interface Auction {
   startingPrice: string;
   minBidIncrement: string;
   currentHighestBid: string | null;
-  currentHighestBidderId: string | null;
+  // Who is winning is deliberately NOT sent to clients — see the
+  // backend's PublicAuction projection. This is the per-caller answer
+  // instead: true only when the signed-in viewer holds the top bid.
+  // Always false for anonymous visitors.
+  viewerIsHighestBidder: boolean;
   status: AuctionStatus;
   version: number;
   startsAt: string;
@@ -24,9 +28,12 @@ export interface Auction {
 export interface Bid {
   id: string;
   auctionId: string;
-  bidderId: string;
   amount: string;
   placedAt: string;
+  // Whether this row is the viewer's own bid. The bidder's identity is
+  // never returned, so this is the only thing a client can know about
+  // who placed what — and the only thing it needs.
+  isMine: boolean;
 }
 
 export interface ListAuctionsParams {

@@ -88,6 +88,7 @@ export function AppHeader() {
             )}
             {user.role === 'ADMIN' && <Link to={paths.admin.root}>Admin</Link>}
             <Link to={paths.myAuctions}>My auctions</Link>
+            <Link to={paths.disputes}>My disputes</Link>
             <Link
               to={paths.orders}
               className="app-header__icon-link"

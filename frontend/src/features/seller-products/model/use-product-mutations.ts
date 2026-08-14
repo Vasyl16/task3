@@ -37,7 +37,21 @@ export function useArchiveProduct() {
     mutationFn: (productId: string) => productApi.archive(productId),
     onSuccess: (product) => {
       queryClient.setQueryData(productKeys.detail(product.id), product);
+      void queryClient.invalidateQueries({ queryKey: productKeys.all });
+    },
+  });
+}
+
+export function useRestoreProduct() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (productId: string) => productApi.restore(productId),
+    onSuccess: (product) => {
+      queryClient.setQueryData(productKeys.detail(product.id), product);
       void queryClient.invalidateQueries({ queryKey: productKeys.lists() });
+      // The seller's own list is a separate key — it is the one showing
+      // the archived row that just changed state.
+      void queryClient.invalidateQueries({ queryKey: productKeys.all });
     },
   });
 }

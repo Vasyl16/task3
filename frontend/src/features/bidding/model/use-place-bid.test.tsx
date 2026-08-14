@@ -23,7 +23,7 @@ function wrapper({ children }: { children: ReactNode }) {
 const BID: import('../../../entities/auction').Bid = {
   id: 'bid-1',
   auctionId: 'auction-1',
-  bidderId: 'buyer-1',
+  isMine: true,
   amount: '10.00',
   placedAt: '2026-01-01T00:00:00.000Z',
 };

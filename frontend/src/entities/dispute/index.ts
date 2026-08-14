@@ -1,6 +1,9 @@
 export type {
   Dispute,
+  DisputeWithOrder,
   DisputeStatus,
+  DisputeComment,
+  AddDisputeCommentInput,
   CreateDisputeInput,
   ListDisputesParams,
   ResolveDisputeInput,
@@ -10,5 +13,6 @@ export {
   useDisputes,
   useDispute,
   useAdminDisputes,
+  useDisputeComments,
 } from './model/use-disputes';
 export { DisputeStatusBadge } from './ui/dispute-status-badge';

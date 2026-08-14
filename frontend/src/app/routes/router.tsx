@@ -1,6 +1,7 @@
 import { createBrowserRouter } from 'react-router-dom';
 import {
   AdminDisputesPage,
+  AdminOrdersPage,
   AdminLayout,
   AdminOverviewPage,
   AdminProductsPage,
@@ -18,6 +19,7 @@ import { NotFoundPage } from '../../pages/not-found';
 import { NotificationsPage } from '../../pages/notifications';
 import { OrderDetailPage } from '../../pages/order-detail';
 import { OrdersPage } from '../../pages/orders';
+import { DisputesPage, DisputeDetailPage } from '../../pages/disputes';
 import { ProductDetailPage } from '../../pages/product-detail';
 import { RegisterPage } from '../../pages/register';
 import {
@@ -69,6 +71,8 @@ export const router = createBrowserRouter([
           { path: paths.checkout, element: <CheckoutPage /> },
           { path: paths.orders, element: <OrdersPage /> },
           { path: '/orders/:id', element: <OrderDetailPage /> },
+          { path: paths.disputes, element: <DisputesPage /> },
+          { path: '/disputes/:id', element: <DisputeDetailPage /> },
           { path: paths.myAuctions, element: <MyAuctionsPage /> },
           { path: paths.notifications, element: <NotificationsPage /> },
           { path: '*', element: <NotFoundPage /> },
@@ -107,6 +111,7 @@ export const router = createBrowserRouter([
               { path: paths.admin.root, element: <AdminOverviewPage /> },
               { path: paths.admin.sellers, element: <AdminSellersPage /> },
               { path: paths.admin.products, element: <AdminProductsPage /> },
+              { path: paths.admin.orders, element: <AdminOrdersPage /> },
               { path: paths.admin.disputes, element: <AdminDisputesPage /> },
             ],
           },

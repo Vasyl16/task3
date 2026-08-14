@@ -11,6 +11,7 @@ import { SellerOwner, useMySellerProfile } from '../../../entities/seller';
 import { paths } from '../../../app/routes/paths';
 import { formatDateTime, formatMoney } from '../../../shared/lib';
 import {
+  Badge,
   Card,
   EmptyState,
   ErrorAlert,
@@ -24,7 +25,7 @@ import { useAuctionCheckout } from '../../../features/checkout';
 
 export function AuctionDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const { user, status } = useAuth();
+  const { status } = useAuth();
   const navigate = useNavigate();
   const { data: auction, error, isPending, refetch } = useAuction(id);
   const { data: bids } = useAuctionBids(id);
@@ -41,8 +42,12 @@ export function AuctionDetailPage() {
   if (error) return <ErrorState error={error} onRetry={() => void refetch()} />;
   if (!auction) return null;
 
-  const isWinner =
-    auction.status === 'ENDED' && auction.currentHighestBidderId === user?.id;
+  // Derived server-side per caller — the winner's identity is never sent
+  // to clients, so this is the only thing the page can know.
+  const isWinner = auction.status === 'ENDED' && auction.viewerIsHighestBidder;
+  const isTopBidder =
+    (auction.status === 'ACTIVE' || auction.status === 'SCHEDULED') &&
+    auction.viewerIsHighestBidder;
   const isOwnAuction =
     status === 'authenticated' && myProfile?.id === auction.sellerId;
 
@@ -57,7 +62,21 @@ export function AuctionDetailPage() {
           }}
         >
           <h1 style={{ margin: 0 }}>{product?.name ?? 'Auction'}</h1>
-          <AuctionStatusBadge status={auction.status} />
+          <div
+            style={{
+              display: 'flex',
+              gap: 'var(--space-2)',
+              alignItems: 'center',
+            }}
+          >
+            {/* Says only whether YOU hold the top bid. Who else is
+                bidding is never sent to the client, so there is nothing
+                here that could identify another bidder. */}
+            {isTopBidder && (
+              <Badge variant="success">You are the top bidder</Badge>
+            )}
+            <AuctionStatusBadge status={auction.status} />
+          </div>
         </div>
 
         <div style={{ margin: 'var(--space-3) 0' }}>

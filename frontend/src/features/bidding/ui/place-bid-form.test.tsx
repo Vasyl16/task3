@@ -18,7 +18,7 @@ function buildAuction(overrides: Partial<Auction> = {}): Auction {
     startingPrice: '10.00',
     minBidIncrement: '5.00',
     currentHighestBid: null,
-    currentHighestBidderId: null,
+    viewerIsHighestBidder: false,
     status: 'ACTIVE',
     version: 0,
     startsAt: '2026-01-01T00:00:00.000Z',
@@ -77,7 +77,7 @@ describe('PlaceBidForm', () => {
       <PlaceBidForm
         auction={buildAuction({
           currentHighestBid: '10.00',
-          currentHighestBidderId: 'buyer-1',
+          viewerIsHighestBidder: false,
         })}
       />,
     );
@@ -104,7 +104,7 @@ describe('PlaceBidForm', () => {
       <PlaceBidForm
         auction={buildAuction({
           currentHighestBid: '10.00',
-          currentHighestBidderId: 'someone-else',
+          viewerIsHighestBidder: false,
         })}
       />,
     );
@@ -121,7 +121,7 @@ describe('PlaceBidForm', () => {
       <PlaceBidForm
         auction={buildAuction({
           currentHighestBid: '10.00',
-          currentHighestBidderId: 'buyer-1',
+          viewerIsHighestBidder: false,
         })}
       />,
     );

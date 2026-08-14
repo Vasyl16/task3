@@ -13,6 +13,10 @@ import {
   Table,
 } from '../../../shared/ui';
 import { ResolveDisputeControl } from '../../../features/admin-disputes';
+import { DisputeThread } from '../../../widgets/dispute-thread';
+import { useDispute } from '../../../entities/dispute';
+import { DisputeSubject } from '../../../widgets/dispute-subject';
+import { Spinner } from '../../../shared/ui';
 
 const STATUSES: DisputeStatus[] = [
   'OPEN',
@@ -96,7 +100,22 @@ export function AdminDisputesPage() {
                 {expanded === dispute.id && (
                   <tr>
                     <td colSpan={5}>
-                      <ResolveDisputeControl dispute={dispute} />
+                      <div style={{ display: 'grid', gap: 'var(--space-4)' }}>
+                        {/* What the complaint is actually about, and a
+                            way through to the order — an admin should
+                            not have to rule on "it was damaged" without
+                            seeing which item, or leave this page to act
+                            on the shipment. */}
+                        <AdminDisputeSubject disputeId={dispute.id} />
+                        {/* The conversation first, then the ruling —
+                            an admin should read what was argued before
+                            deciding, not after. */}
+                        <DisputeThread
+                          disputeId={dispute.id}
+                          status={dispute.status}
+                        />
+                        <ResolveDisputeControl dispute={dispute} />
+                      </div>
                     </td>
                   </tr>
                 )}
@@ -107,4 +126,14 @@ export function AdminDisputesPage() {
       )}
     </div>
   );
+}
+
+// Fetched per expanded row rather than with the list: the queue can be
+// long, and the order context is only needed for the one being worked
+// on. GET /disputes/:id carries the same access rule the list does.
+function AdminDisputeSubject({ disputeId }: { disputeId: string }) {
+  const { data: dispute, isPending } = useDispute(disputeId);
+  if (isPending) return <Spinner />;
+  if (!dispute) return null;
+  return <DisputeSubject dispute={dispute} />;
 }

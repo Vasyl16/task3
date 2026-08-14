@@ -12,6 +12,8 @@ export const paths = {
   cart: '/cart',
   checkout: '/checkout',
   orders: '/orders',
+  disputes: '/disputes',
+  dispute: (id: string) => `/disputes/${id}`,
   order: (id: string) => `/orders/${id}`,
   notifications: '/notifications',
   myAuctions: '/my-auctions',
@@ -29,6 +31,7 @@ export const paths = {
     root: '/admin',
     sellers: '/admin/sellers',
     products: '/admin/products',
+    orders: '/admin/orders',
     disputes: '/admin/disputes',
   },
 } as const;
