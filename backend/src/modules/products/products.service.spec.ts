@@ -48,6 +48,7 @@ function buildProduct(overrides: Partial<Product> = {}): Product {
     name: 'Widget',
     slug: 'widget',
     description: null,
+    imageUrl: null,
     basePrice: '9.99' as unknown as Product['basePrice'],
     type: ProductType.FIXED_PRICE,
     status: ProductStatus.ACTIVE,
@@ -107,7 +108,10 @@ describe('ProductsService', () => {
       archive: jest.fn(),
       findManyWithInventory: jest.fn(),
       decrementStock: jest.fn(),
+      reserveStock: jest.fn(),
+      releaseReservation: jest.fn(),
       restoreStock: jest.fn(),
+      setStock: jest.fn(),
       findForModeration: jest.fn(),
       setModerationStatus: jest.fn(),
     };
@@ -354,6 +358,84 @@ describe('ProductsService', () => {
       ).not.toHaveBeenCalled();
       expect(productsRepository.update).toHaveBeenCalled();
     });
+
+    it('does not touch inventory when quantityAvailable is omitted', async () => {
+      productsRepository.findById.mockResolvedValue(
+        buildProduct({ sellerId: 'my-profile' }),
+      );
+      sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue(
+        buildSellerProfile({ id: 'my-profile' }),
+      );
+      productsRepository.update.mockResolvedValue(buildProduct());
+
+      await productsService.update('product-1', buildCaller(), {
+        name: 'New name',
+      });
+
+      expect(productsRepository.setStock).not.toHaveBeenCalled();
+    });
+
+    it('sets stock and records a SELLER_ADJUSTMENT InventoryUpdated event, in the same transaction as the product write', async () => {
+      productsRepository.findById.mockResolvedValue(
+        buildProduct({ sellerId: 'my-profile' }),
+      );
+      sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue(
+        buildSellerProfile({ id: 'my-profile' }),
+      );
+      productsRepository.update.mockResolvedValue(buildProduct());
+      productsRepository.setStock.mockResolvedValue(
+        buildInventory({ quantityAvailable: 25, version: 2 }),
+      );
+
+      await productsService.update('product-1', buildCaller(), {
+        quantityAvailable: 25,
+      });
+
+      const [txArg, productIdArg, quantityArg] =
+        productsRepository.setStock.mock.calls[0];
+      expect(txArg).toBe(fakeTx);
+      expect(productIdArg).toBe('product-1');
+      expect(quantityArg).toBe(25);
+
+      // quantityAvailable must not leak into the plain product-fields
+      // update — it's a separate write against Inventory, not Product.
+      const [, , productDataArg] = productsRepository.update.mock.calls[0];
+      expect(productDataArg).not.toHaveProperty('quantityAvailable');
+
+      expect(outboxService.record).toHaveBeenCalledWith(
+        fakeTx,
+        expect.objectContaining({
+          eventType: INVENTORY_UPDATED_EVENT,
+          aggregateType: 'Inventory',
+          payload: expect.objectContaining({
+            quantityAvailable: 25,
+            reason: 'SELLER_ADJUSTMENT',
+          }),
+        }),
+      );
+    });
+
+    // Optimistic-locking guard: ProductsRepository.setStock returns null
+    // when Inventory.version moved between its read and its conditional
+    // write (a concurrent checkout/restore committed in between) — the
+    // service must surface that as a conflict, never silently drop the
+    // seller's edit or clobber the concurrent change.
+    it('rejects the whole update if stock changed concurrently, rather than silently losing the edit', async () => {
+      productsRepository.findById.mockResolvedValue(
+        buildProduct({ sellerId: 'my-profile' }),
+      );
+      sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue(
+        buildSellerProfile({ id: 'my-profile' }),
+      );
+      productsRepository.update.mockResolvedValue(buildProduct());
+      productsRepository.setStock.mockResolvedValue(null);
+
+      await expect(
+        productsService.update('product-1', buildCaller(), {
+          quantityAvailable: 25,
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
   });
 
   describe('archive (deactivation)', () => {
@@ -511,6 +593,77 @@ describe('ProductsService', () => {
     });
   });
 
+  // GET /products and GET /products/:id are @Public(). They were
+  // returning the raw Product row, which carries the moderation audit
+  // trail — an admin's user id and their free-text reason for taking a
+  // listing down — to anonymous callers.
+  describe('public catalog projection', () => {
+    const MODERATED = {
+      moderatedByUserId: 'admin-1',
+      moderatedAt: NOW,
+      moderationNote: 'Counterfeit — reported by three buyers',
+    };
+
+    it('strips the moderation audit trail from a single product', async () => {
+      productsRepository.findById.mockResolvedValue(
+        buildProduct({ ...MODERATED }),
+      );
+
+      const product = await productsService.findByIdForCatalog('product-1');
+
+      expect(product).not.toHaveProperty('moderatedByUserId');
+      expect(product).not.toHaveProperty('moderatedAt');
+      expect(product).not.toHaveProperty('moderationNote');
+      expect(JSON.stringify(product)).not.toContain('Counterfeit');
+    });
+
+    it('keeps every field a shopper actually needs', async () => {
+      productsRepository.findById.mockResolvedValue(buildProduct());
+
+      const product = await productsService.findByIdForCatalog('product-1');
+
+      expect(product).toMatchObject({
+        id: 'product-1',
+        sellerId: 'seller-profile-1',
+        name: 'Widget',
+        slug: 'widget',
+        basePrice: '9.99',
+        status: ProductStatus.ACTIVE,
+        type: ProductType.FIXED_PRICE,
+      });
+    });
+
+    it('strips the audit trail from every item in a list, not just the first', async () => {
+      productsRepository.findAll.mockResolvedValue([
+        buildProduct({ id: 'p1' }),
+        buildProduct({ id: 'p2', ...MODERATED }),
+      ]);
+
+      const products = await productsService.findAllForCatalog();
+
+      expect(products).toHaveLength(2);
+      for (const product of products) {
+        expect(product).not.toHaveProperty('moderationNote');
+      }
+    });
+
+    // The internal lookups feed cart/bidding/orders and the
+    // ownership-checked write paths, which legitimately need the full
+    // row — only the @Public() routes get the projection.
+    it('leaves the internal findById untouched', async () => {
+      productsRepository.findById.mockResolvedValue(
+        buildProduct({ ...MODERATED }),
+      );
+
+      await expect(
+        productsService.findById('product-1'),
+      ).resolves.toHaveProperty(
+        'moderationNote',
+        'Counterfeit — reported by three buyers',
+      );
+    });
+  });
+
   describe('checkout support', () => {
     it('decrementStockForCheckout succeeds silently when stock is sufficient', async () => {
       productsRepository.decrementStock.mockResolvedValue(buildInventory());
@@ -550,6 +703,82 @@ describe('ProductsService', () => {
         fakeTx,
         'product-1',
         3,
+      );
+    });
+  });
+
+  // A hold keeps units in stock but out of the cart's reach. Consumers
+  // (search's inStock, BiddingService's lot check) treat sellable as
+  // quantityAvailable - quantityReserved, so a hold must move exactly
+  // one of the two counters — moving both would charge a unit twice.
+  describe('auction stock holds', () => {
+    it('reserveStockForAuction succeeds when enough units are free', async () => {
+      productsRepository.reserveStock.mockResolvedValue(buildInventory());
+
+      await expect(
+        productsService.reserveStockForAuction(fakeTx as never, 'product-1', 2),
+      ).resolves.toBeUndefined();
+      expect(productsRepository.reserveStock).toHaveBeenCalledWith(
+        fakeTx,
+        'product-1',
+        2,
+      );
+    });
+
+    it('reserveStockForAuction throws ConflictException when the units are not free', async () => {
+      productsRepository.reserveStock.mockResolvedValue(null);
+
+      await expect(
+        productsService.reserveStockForAuction(fakeTx as never, 'product-1', 2),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('announces a hold as AUCTION_HOLD, carrying the post-hold quantities', async () => {
+      productsRepository.reserveStock.mockResolvedValue(
+        buildInventory({ quantityAvailable: 5, quantityReserved: 2 }),
+      );
+
+      await productsService.reserveStockForAuction(
+        fakeTx as never,
+        'product-1',
+        2,
+      );
+
+      expect(outboxService.record).toHaveBeenCalledWith(
+        fakeTx,
+        expect.objectContaining({
+          eventType: 'InventoryUpdated',
+          payload: expect.objectContaining({
+            quantityAvailable: 5,
+            quantityReserved: 2,
+            reason: 'AUCTION_HOLD',
+          }),
+        }),
+      );
+    });
+
+    it('announces a release as AUCTION_RELEASE', async () => {
+      productsRepository.releaseReservation.mockResolvedValue(
+        buildInventory({ quantityAvailable: 5, quantityReserved: 0 }),
+      );
+
+      await productsService.releaseAuctionReservation(
+        fakeTx as never,
+        'product-1',
+        2,
+      );
+
+      expect(productsRepository.releaseReservation).toHaveBeenCalledWith(
+        fakeTx,
+        'product-1',
+        2,
+      );
+      expect(outboxService.record).toHaveBeenCalledWith(
+        fakeTx,
+        expect.objectContaining({
+          eventType: 'InventoryUpdated',
+          payload: expect.objectContaining({ reason: 'AUCTION_RELEASE' }),
+        }),
       );
     });
   });

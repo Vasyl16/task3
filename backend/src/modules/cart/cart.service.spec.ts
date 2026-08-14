@@ -1,8 +1,13 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { ProductStatus, ProductType, type Product } from '@prisma/client';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service';
 import { ProductsService } from '../products/products.service';
+import { SellersService } from '../sellers/sellers.service';
 import { CartRepository } from './domain/cart.repository';
 import { CartService } from './cart.service';
 
@@ -21,6 +26,7 @@ function buildProduct(overrides: Partial<Product> = {}): Product {
     name: 'Widget',
     slug: 'widget',
     description: null,
+    imageUrl: null,
     basePrice: '9.99' as unknown as Product['basePrice'],
     type: ProductType.FIXED_PRICE,
     status: ProductStatus.ACTIVE,
@@ -37,6 +43,7 @@ describe('CartService', () => {
   let cartService: CartService;
   let cartRepository: jest.Mocked<CartRepository>;
   let productsService: jest.Mocked<Pick<ProductsService, 'findById'>>;
+  let sellersService: jest.Mocked<Pick<SellersService, 'findByUserId'>>;
 
   beforeEach(async () => {
     cartRepository = {
@@ -51,12 +58,16 @@ describe('CartService', () => {
       markSessionsConverted: jest.fn(),
     };
     productsService = { findById: jest.fn() };
+    // Defaults to "buyer has no seller profile at all" — the common
+    // case — so existing tests don't need to know this check exists.
+    sellersService = { findByUserId: jest.fn().mockResolvedValue(null) };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
         CartService,
         { provide: CartRepository, useValue: cartRepository },
         { provide: ProductsService, useValue: productsService },
+        { provide: SellersService, useValue: sellersService },
         {
           provide: PrismaService,
           useValue: {
@@ -222,6 +233,55 @@ describe('CartService', () => {
         fakeTx,
         'cart-1',
         'product-b',
+        1,
+      );
+    });
+
+    it('rejects a seller adding their own product to their cart', async () => {
+      productsService.findById.mockResolvedValue(
+        buildProduct({ sellerId: 'seller-profile-1' }),
+      );
+      sellersService.findByUserId.mockResolvedValue({
+        id: 'seller-profile-1',
+      } as Awaited<ReturnType<SellersService['findByUserId']>>);
+
+      await expect(
+        cartService.addItem('buyer-1', { productId: 'product-1', quantity: 1 }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(cartRepository.addItem).not.toHaveBeenCalled();
+    });
+
+    it('allows a seller to add a DIFFERENT seller’s product to their cart', async () => {
+      cartRepository.findByBuyerId.mockResolvedValue({
+        id: 'cart-1',
+        buyerId: 'buyer-1',
+        createdAt: NOW,
+        updatedAt: NOW,
+        items: [],
+      });
+      productsService.findById.mockResolvedValue(
+        buildProduct({ sellerId: 'seller-profile-2' }),
+      );
+      sellersService.findByUserId.mockResolvedValue({
+        id: 'seller-profile-1',
+      } as Awaited<ReturnType<SellersService['findByUserId']>>);
+      cartRepository.addItem.mockResolvedValue({
+        id: 'item-1',
+        cartId: 'cart-1',
+        productId: 'product-1',
+        quantity: 1,
+        addedAt: NOW,
+      });
+
+      await cartService.addItem('buyer-1', {
+        productId: 'product-1',
+        quantity: 1,
+      });
+
+      expect(cartRepository.addItem).toHaveBeenCalledWith(
+        fakeTx,
+        'cart-1',
+        'product-1',
         1,
       );
     });

@@ -119,6 +119,10 @@ describe('Realtime gateway (e2e, real socket + real database)', () => {
     for (const socket of sockets) {
       socket.disconnect();
     }
+    // Cancelling a SellerOrder opens a Refund (the refund saga —
+    // see RefundConsumer), which holds a Restrict FK to it, so the
+    // refund has to go first or the SellerOrder can't be deleted.
+    await prisma.refund.deleteMany({ where: { sellerOrderId } });
     await prisma.sellerOrder.deleteMany({ where: { id: sellerOrderId } });
     await prisma.order.deleteMany({ where: { id: orderId } });
     await prisma.inventory.deleteMany({ where: { productId } });
@@ -412,6 +416,7 @@ describe('Realtime gateway (e2e, real socket + real database)', () => {
       await deliver(SELLER_ORDER_STATUS_CHANGED_EVENT, {
         sellerOrderId,
         orderId,
+        buyerId: buyer.id,
         status: SellerOrderStatus.SHIPPED,
         orderStatus: OrderStatus.SHIPPED,
       });

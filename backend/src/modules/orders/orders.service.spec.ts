@@ -5,10 +5,12 @@ import {
 } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import {
+  AuctionStatus,
   ProductStatus,
   ProductType,
   SellerOrderStatus,
   UserRole,
+  type Auction,
   type Order,
   type Product,
   type SellerOrder,
@@ -66,6 +68,7 @@ function buildProduct(
     name: 'Widget',
     slug: 'widget',
     description: null,
+    imageUrl: null,
     basePrice: '10.00' as unknown as Product['basePrice'],
     type: ProductType.FIXED_PRICE,
     status: ProductStatus.ACTIVE,
@@ -91,6 +94,27 @@ function buildSellerProfile(
     reviewedByUserId: null,
     reviewedAt: NOW,
     appliedAt: NOW,
+    createdAt: NOW,
+    updatedAt: NOW,
+    ...overrides,
+  };
+}
+
+function buildAuction(overrides: Partial<Auction> = {}): Auction {
+  return {
+    id: 'auction-1',
+    productId: 'product-1',
+    sellerId: 'seller-profile-1',
+    quantity: 1,
+    startingPrice: '50.00' as unknown as Auction['startingPrice'],
+    minBidIncrement: '5.00' as unknown as Auction['minBidIncrement'],
+    currentHighestBid: '100.00' as unknown as Auction['currentHighestBid'],
+    currentHighestBidderId: 'buyer-1',
+    status: AuctionStatus.ENDED,
+    version: 1,
+    startsAt: NOW,
+    endsAt: NOW,
+    checkoutDeadline: new Date(NOW.getTime() + 60_000),
     createdAt: NOW,
     updatedAt: NOW,
     ...overrides,
@@ -123,6 +147,7 @@ describe('OrdersService', () => {
       | 'findManyWithInventoryForCheckout'
       | 'decrementStockForCheckout'
       | 'restoreStock'
+      | 'releaseAuctionReservation'
     >
   >;
   let outboxService: jest.Mocked<Pick<OutboxService, 'record'>>;
@@ -149,6 +174,7 @@ describe('OrdersService', () => {
       updateOrderStatus: jest.fn().mockResolvedValue(buildOrder()),
       findOrderItemsForSellerOrder: jest.fn(),
       findSellerOrderStatusesForOrder: jest.fn(),
+      findBySellerId: jest.fn(),
     };
     sellersService = {
       getOwnApprovedSellerProfileOrThrow: jest.fn(),
@@ -162,6 +188,7 @@ describe('OrdersService', () => {
       findManyWithInventoryForCheckout: jest.fn(),
       decrementStockForCheckout: jest.fn(),
       restoreStock: jest.fn(),
+      releaseAuctionReservation: jest.fn(),
     };
     outboxService = { record: jest.fn() };
     biddingService = {
@@ -229,6 +256,47 @@ describe('OrdersService', () => {
         buildCaller({ id: 'admin-1', role: UserRole.ADMIN }),
       );
       expect(order.id).toBe('order-1');
+    });
+  });
+
+  describe('findMySellerOrders', () => {
+    it("resolves sellerId from the caller's own approved profile, not a client-supplied id", async () => {
+      sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue(
+        buildSellerProfile({ id: 'seller-profile-1', userId: 'caller-1' }),
+      );
+      ordersRepository.findBySellerId.mockResolvedValue([
+        {
+          ...buildSellerOrder({ id: 'so-1', sellerId: 'seller-profile-1' }),
+          order: {
+            id: 'order-1',
+            status: SellerOrderStatus.NEW,
+            placedAt: NOW,
+          },
+        },
+      ]);
+
+      const result = await ordersService.findMySellerOrders('caller-1');
+
+      expect(
+        sellersService.getOwnApprovedSellerProfileOrThrow,
+      ).toHaveBeenCalledWith('caller-1');
+      // The repository is queried by the RESOLVED profile id, never by
+      // anything the caller could have supplied directly.
+      expect(ordersRepository.findBySellerId).toHaveBeenCalledWith(
+        'seller-profile-1',
+      );
+      expect(result).toHaveLength(1);
+    });
+
+    it('IDOR: rejects a caller with no approved seller profile', async () => {
+      sellersService.getOwnApprovedSellerProfileOrThrow.mockRejectedValue(
+        new ForbiddenException('No approved seller profile for this account'),
+      );
+
+      await expect(
+        ordersService.findMySellerOrders('not-a-seller'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(ordersRepository.findBySellerId).not.toHaveBeenCalled();
     });
   });
 
@@ -478,6 +546,121 @@ describe('OrdersService', () => {
       await expect(ordersService.checkout('buyer-1')).rejects.toBeInstanceOf(
         BadRequestException,
       );
+    });
+  });
+
+  describe('checkoutAuctionWin', () => {
+    beforeEach(() => {
+      productsService.findManyWithInventoryForCheckout.mockResolvedValue([
+        buildProduct({
+          id: 'product-1',
+          type: ProductType.AUCTION,
+          inventory: { quantityAvailable: 10, quantityReserved: 0 } as never,
+        }),
+      ]);
+      productsService.decrementStockForCheckout.mockResolvedValue(undefined);
+      sellersService.findById.mockResolvedValue(
+        buildSellerProfile({ id: 'seller-profile-1' }),
+      );
+      ordersRepository.createFromCheckout.mockResolvedValue({
+        order: buildOrder(),
+        sellerOrders: [buildSellerOrder()],
+      });
+    });
+
+    // A single-unit lot (the common case) is exactly the winning bid —
+    // no division, so no rounding question even arises.
+    it('a single-unit win checks out at exactly the winning bid, decrementing 1 unit of stock', async () => {
+      biddingService.findAuctionById.mockResolvedValue(
+        buildAuction({ quantity: 1, currentHighestBid: '100.00' as never }),
+      );
+
+      await ordersService.checkoutAuctionWin('auction-1', 'buyer-1');
+
+      expect(productsService.decrementStockForCheckout).toHaveBeenCalledWith(
+        fakeTx,
+        'product-1',
+        1,
+      );
+      const [, checkoutInput] =
+        ordersRepository.createFromCheckout.mock.calls[0];
+      expect(checkoutInput.sellerLines[0].subtotal).toBe(100);
+    });
+
+    // The winning bid is a LOT price for the whole quantity, not a
+    // per-unit price — decrementing `quantity` units at `bid / quantity`
+    // each must still total back to the actual amount the winner bid.
+    it('a multi-unit win decrements the full lot size and totals back to the winning bid', async () => {
+      biddingService.findAuctionById.mockResolvedValue(
+        buildAuction({ quantity: 4, currentHighestBid: '100.00' as never }),
+      );
+
+      await ordersService.checkoutAuctionWin('auction-1', 'buyer-1');
+
+      expect(productsService.decrementStockForCheckout).toHaveBeenCalledWith(
+        fakeTx,
+        'product-1',
+        4,
+      );
+      const [, checkoutInput] =
+        ordersRepository.createFromCheckout.mock.calls[0];
+      expect(checkoutInput.sellerLines[0].subtotal).toBe(100);
+      expect(checkoutInput.sellerLines[0].items[0]).toMatchObject({
+        productId: 'product-1',
+        quantity: 4,
+        unitPrice: 25,
+      });
+    });
+
+    // The lot has been held since the auction was created, and that hold
+    // is counted against sellable stock — so it has to come off BEFORE
+    // the decrement, or a win covering all remaining stock would be
+    // blocked by its own reservation.
+    it('releases the auction hold before decrementing the units it covers', async () => {
+      biddingService.findAuctionById.mockResolvedValue(
+        buildAuction({ quantity: 2 }),
+      );
+
+      await ordersService.checkoutAuctionWin('auction-1', 'buyer-1');
+
+      expect(productsService.releaseAuctionReservation).toHaveBeenCalledWith(
+        fakeTx,
+        'product-1',
+        2,
+      );
+      const releaseOrder =
+        productsService.releaseAuctionReservation.mock.invocationCallOrder[0];
+      const decrementOrder =
+        productsService.decrementStockForCheckout.mock.invocationCallOrder[0];
+      expect(releaseOrder).toBeLessThan(decrementOrder);
+    });
+
+    it('marks the auction COMPLETED in the same transaction as the order', async () => {
+      biddingService.findAuctionById.mockResolvedValue(buildAuction());
+
+      await ordersService.checkoutAuctionWin('auction-1', 'buyer-1');
+
+      expect(biddingService.markAuctionCompleted).toHaveBeenCalledWith(
+        fakeTx,
+        'auction-1',
+      );
+    });
+
+    it('rejects if the auctioned product is no longer ACTIVE', async () => {
+      biddingService.findAuctionById.mockResolvedValue(buildAuction());
+      productsService.findManyWithInventoryForCheckout.mockResolvedValue([
+        buildProduct({
+          id: 'product-1',
+          type: ProductType.AUCTION,
+          status: ProductStatus.ARCHIVED,
+          inventory: { quantityAvailable: 10, quantityReserved: 0 } as never,
+        }),
+      ]);
+
+      await expect(
+        ordersService.checkoutAuctionWin('auction-1', 'buyer-1'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(ordersRepository.createFromCheckout).not.toHaveBeenCalled();
     });
   });
 

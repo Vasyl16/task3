@@ -29,6 +29,7 @@ describe('RealtimeRoomsService', () => {
     sellerOrder: { findUnique: jest.Mock };
     product: { findUnique: jest.Mock };
     auction: { findUnique: jest.Mock };
+    notification: { count: jest.Mock };
   };
 
   beforeEach(() => {
@@ -37,6 +38,7 @@ describe('RealtimeRoomsService', () => {
       sellerOrder: { findUnique: jest.fn() },
       product: { findUnique: jest.fn() },
       auction: { findUnique: jest.fn() },
+      notification: { count: jest.fn() },
     };
     service = new RealtimeRoomsService(prisma as unknown as PrismaService);
   });
@@ -153,6 +155,28 @@ describe('RealtimeRoomsService', () => {
         error: RealtimeAckError.NOT_FOUND,
         message: expect.any(String) as string,
       });
+    });
+
+    it('lets a user watch their own notification room', async () => {
+      await expect(
+        service.authorize(room('notification:user-1'), buildUser()),
+      ).resolves.toEqual({ allowed: true });
+    });
+
+    // The IDOR case: no DB lookup even happens — the room id IS the
+    // userId, so a mismatch is refused without ever touching Postgres.
+    it('refuses a user watching someone else’s notification room', async () => {
+      const result = await service.authorize(
+        room('notification:someone-else'),
+        buildUser({ id: 'attacker' }),
+      );
+
+      expect(result).toEqual({
+        allowed: false,
+        error: RealtimeAckError.NOT_FOUND,
+        message: expect.any(String) as string,
+      });
+      expect(prisma.notification.count).not.toHaveBeenCalled();
     });
   });
 
@@ -285,6 +309,21 @@ describe('RealtimeRoomsService', () => {
       await expect(
         service.snapshot(room('product:missing')),
       ).resolves.toBeNull();
+    });
+
+    it('reads a notification room’s unread count straight from Postgres', async () => {
+      prisma.notification.count.mockResolvedValue(3);
+
+      const snapshot = await service.snapshot(room('notification:user-1'));
+
+      expect(prisma.notification.count).toHaveBeenCalledWith({
+        where: { userId: 'user-1', readAt: null },
+      });
+      expect(snapshot).toMatchObject({
+        room: 'notification:user-1',
+        authoritativeSource: 'GET /notifications',
+        state: { userId: 'user-1', unreadCount: 3 },
+      });
     });
   });
 });

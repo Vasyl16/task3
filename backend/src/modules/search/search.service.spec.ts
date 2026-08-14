@@ -1,4 +1,5 @@
 import { ServiceUnavailableException } from '@nestjs/common';
+import { ProductType } from '@prisma/client';
 import type { MeilisearchService } from '../../infrastructure/meilisearch/meilisearch.service';
 import {
   SearchQueryDto,
@@ -77,6 +78,12 @@ describe('SearchService', () => {
       );
     });
 
+    it('builds a type filter clause', async () => {
+      await searchService.search(query({ type: ProductType.AUCTION }));
+      const [, opts] = search.mock.calls[0];
+      expect(opts.filter).toContain('type = "AUCTION"');
+    });
+
     it('builds a minRating filter clause', async () => {
       await searchService.search(query({ minRating: 4 }));
       const [, opts] = search.mock.calls[0];
@@ -134,7 +141,9 @@ describe('SearchService', () => {
             sellerId: 's1',
             sellerName: 'Acme',
             sellerRating: 4.2,
+            type: 'FIXED_PRICE',
             inStock: true,
+            hasActiveAuction: false,
           },
         ],
         estimatedTotalHits: 42,
@@ -155,7 +164,9 @@ describe('SearchService', () => {
             sellerId: 's1',
             sellerName: 'Acme',
             sellerRating: 4.2,
+            type: 'FIXED_PRICE',
             inStock: true,
+            hasActiveAuction: false,
           },
         ],
         total: 42,
@@ -163,6 +174,36 @@ describe('SearchService', () => {
         limit: 10,
         facets: { categoryId: { c1: 1 } },
       });
+    });
+
+    // A document indexed before hasActiveAuction existed (not yet
+    // re-synced by any subsequent product/auction event) has it
+    // genuinely absent — never surface `undefined` on a boolean field.
+    it('defaults hasActiveAuction to false for a not-yet-resynced document', async () => {
+      search.mockResolvedValue({
+        hits: [
+          {
+            id: 'p1',
+            name: 'Widget',
+            description: null,
+            basePrice: 9.99,
+            categoryId: 'c1',
+            categoryName: 'Gadgets',
+            sellerId: 's1',
+            sellerName: 'Acme',
+            sellerRating: 4.2,
+            type: 'AUCTION',
+            inStock: true,
+            // hasActiveAuction deliberately omitted
+          },
+        ],
+        estimatedTotalHits: 1,
+        facetDistribution: {},
+      });
+
+      const result = await searchService.search(query());
+
+      expect(result.items[0]?.hasActiveAuction).toBe(false);
     });
   });
 

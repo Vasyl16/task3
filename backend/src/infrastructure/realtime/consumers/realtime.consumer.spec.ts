@@ -92,7 +92,7 @@ describe('RealtimeConsumer', () => {
     ]);
   });
 
-  it('broadcasts the end of an auction to the same room bidders are already watching', async () => {
+  it('broadcasts the end of an auction to the same room bidders are already watching, and pokes the winner’s notification room', async () => {
     await consumer.process(
       buildJob(AUCTION_ENDED_EVENT, {
         auctionId: 'a1',
@@ -103,16 +103,39 @@ describe('RealtimeConsumer', () => {
 
     expect(broadcasts()).toMatchObject([
       { room: 'auction:a1', event: RealtimeEventName.AUCTION_ENDED },
+      {
+        room: 'notification:user-1',
+        event: RealtimeEventName.NOTIFICATION_CREATED,
+        authoritativeSource: 'GET /notifications',
+      },
+    ]);
+  });
+
+  it('broadcasts only to the auction room when nobody won (no bids placed)', async () => {
+    await consumer.process(
+      buildJob(AUCTION_ENDED_EVENT, {
+        auctionId: 'a1',
+        winningBidderId: null,
+        winningAmount: null,
+      }),
+    );
+
+    expect(broadcasts()).toMatchObject([
+      { room: 'auction:a1', event: RealtimeEventName.AUCTION_ENDED },
     ]);
   });
 
   // A buyer watching the whole order and a seller watching just their
-  // half are different subscriptions that both need this fact.
-  it('broadcasts a SellerOrder status change to both the parent order room and the seller-order room', async () => {
+  // half are different subscriptions that both need this fact. The
+  // buyer's notification room is a third, independent subscription —
+  // live even when they're nowhere near the order/seller-order rooms
+  // (e.g. browsing the catalog).
+  it('broadcasts a SellerOrder status change to the order room, the seller-order room, and the buyer’s notification room', async () => {
     await consumer.process(
       buildJob(SELLER_ORDER_STATUS_CHANGED_EVENT, {
         sellerOrderId: 's1',
         orderId: 'o1',
+        buyerId: 'buyer-1',
         status: 'SHIPPED',
         orderStatus: 'PARTIALLY_SHIPPED',
       }),
@@ -130,6 +153,11 @@ describe('RealtimeConsumer', () => {
         // A SellerOrder is only readable through its parent order.
         authoritativeSource: 'GET /orders/o1',
       },
+      {
+        room: 'notification:buyer-1',
+        event: RealtimeEventName.NOTIFICATION_CREATED,
+        authoritativeSource: 'GET /notifications',
+      },
     ]);
   });
 
@@ -138,6 +166,7 @@ describe('RealtimeConsumer', () => {
       buildJob(SELLER_ORDER_STATUS_CHANGED_EVENT, {
         sellerOrderId: 's1',
         orderId: 'o1',
+        buyerId: 'buyer-1',
         status: 'SHIPPED',
         orderStatus: 'PARTIALLY_SHIPPED',
       }),

@@ -20,3 +20,19 @@ process.env.LOG_FILE = '';
 process.env.DATABASE_URL ??= 'postgresql://test:test@localhost:5432/test_db';
 process.env.JWT_ACCESS_SECRET ??= 'test_access_secret_min_16_chars';
 process.env.JWT_REFRESH_SECRET ??= 'test_refresh_secret_min_16_chars';
+
+// Rate limiting off for e2e. A test file registers and logs in far more
+// often than any human would — all from one IP — so the real limits
+// would reject requests for reasons unrelated to what is being tested
+// and make failures look like product bugs. throttling.e2e-spec.ts sets
+// its own low limits before compiling its module, so the limiter itself
+// is still covered.
+//
+// Unconditional (not ??=), like LOG_FILE above, and for the same kind of
+// reason: dotenv.config() has already run, so a developer's own
+// THROTTLE_* values in backend/.env would otherwise win and decide
+// whether the concurrency suites pass. That is exactly what happened —
+// the suite was green only because a local .env carried inflated limits,
+// and would have failed in CI, which sets none.
+process.env.THROTTLE_LIMIT = '1000000';
+process.env.THROTTLE_AUTH_LIMIT = '1000000';

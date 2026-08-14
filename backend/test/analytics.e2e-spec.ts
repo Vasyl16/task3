@@ -99,6 +99,12 @@ describe('Admin analytics (e2e, real database)', () => {
     await prisma.ledgerEntry.deleteMany({
       where: { sellerId: { in: createdSellerProfileIds } },
     });
+    // Cancelling a SellerOrder opens a Refund (the refund saga —
+    // see RefundConsumer), which holds a Restrict FK to it, so the
+    // refund has to go first or the SellerOrder can't be deleted.
+    await prisma.refund.deleteMany({
+      where: { sellerOrderId: { in: sellerOrderIds } },
+    });
     await prisma.sellerOrder.deleteMany({
       where: { id: { in: sellerOrderIds } },
     });

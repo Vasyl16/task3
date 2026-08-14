@@ -113,6 +113,9 @@ describe('Bidding concurrency (e2e, real database)', () => {
       .set('Authorization', `Bearer ${sellerToken}`)
       .send({
         productId: product.id,
+        // The lot size. Required since auctions began holding stock
+        // rather than consuming it — see BiddingService.createAuction.
+        quantity: 1,
         startingPrice: 100,
         minBidIncrement: 10,
         startsAt: new Date().toISOString(),
@@ -269,6 +272,75 @@ describe('Bidding concurrency (e2e, real database)', () => {
     // only one UPDATE actually applied.
     expect(auction.version).toBe(1);
   }, 20000);
+
+  // The previous test proves no lost update for a TIE. This proves the
+  // stronger business invariant under a realistic sniping burst: with
+  // many bidders racing at different amounts, the auction must converge
+  // on the genuine highest, and the accepted bids must form a strictly
+  // ascending chain. A lost update would show up here as an accepted bid
+  // that is lower than one accepted before it, or as a
+  // currentHighestBid that doesn't match any accepted bid at all.
+  it('many concurrent bids at different amounts: the true highest wins and the accepted chain only ascends', async () => {
+    const { auctionId } = await makeAuctionFixture('burst');
+
+    const amounts = [110, 120, 130, 140, 150, 160];
+    const bidders = await Promise.all(
+      amounts.map((amount) =>
+        registerUser(app, prisma, `bidder-burst${amount}-${run}@example.com`),
+      ),
+    );
+    bidders.forEach((b) => createdUserIds.push(b.id));
+
+    // Fired together, deliberately not in amount order — whoever's
+    // request lands first is down to network/scheduling, exactly as in a
+    // real closing-seconds burst.
+    const responses = await Promise.all(
+      bidders.map((bidder, i) =>
+        request(app.getHttpServer())
+          .post(`/auctions/${auctionId}/bids`)
+          .set(...authHeader(bidder))
+          .send({ amount: amounts[i] })
+          .then((res) => ({ status: res.status, amount: amounts[i] })),
+      ),
+    );
+
+    const accepted = responses.filter((r) => r.status === 201);
+    // Every rejection must be a rejection on the merits (400: the amount
+    // no longer clears the raised minimum) or an honest contention
+    // failure (409) — never a 500.
+    for (const r of responses) {
+      expect([201, 400, 409]).toContain(r.status);
+    }
+    expect(accepted.length).toBeGreaterThan(0);
+
+    const bids = await prisma.bid.findMany({
+      where: { auctionId },
+      orderBy: { placedAt: 'asc' },
+    });
+    // No phantom rows: a Bid row exists for exactly the accepted
+    // requests, and for no others.
+    expect(bids).toHaveLength(accepted.length);
+
+    // THE invariant. Each accepted bid strictly exceeds the one before
+    // it by at least the increment; a lost update is precisely the case
+    // where this fails.
+    const chain = bids.map((b) => Number(b.amount));
+    for (let i = 1; i < chain.length; i++) {
+      expect(chain[i]).toBeGreaterThanOrEqual(chain[i - 1] + 10);
+    }
+
+    const auction = await prisma.auction.findUniqueOrThrow({
+      where: { id: auctionId },
+    });
+    const highest = Math.max(...chain);
+    expect(Number(auction.currentHighestBid)).toBe(highest);
+    // The recorded winner is the account that actually placed that bid.
+    const winningBid = bids.find((b) => Number(b.amount) === highest);
+    expect(auction.currentHighestBidderId).toBe(winningBid?.bidderId);
+    // One version bump per accepted bid — no UPDATE was silently lost,
+    // and none applied twice.
+    expect(auction.version).toBe(accepted.length);
+  }, 30000);
 
   it('winner determination: endAuction sets ENDED, records the winner, and opens the checkout window', async () => {
     const { auctionId } = await makeAuctionFixture('winner');

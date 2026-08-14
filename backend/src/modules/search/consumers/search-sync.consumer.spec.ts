@@ -49,6 +49,7 @@ describe('SearchSyncConsumer', () => {
     sellerProfile: { findUniqueOrThrow: jest.Mock };
     inventory: { findUnique: jest.Mock };
     review: { aggregate: jest.Mock };
+    auction: { count: jest.Mock };
   };
 
   beforeEach(() => {
@@ -76,6 +77,7 @@ describe('SearchSyncConsumer', () => {
       review: {
         aggregate: jest.fn().mockResolvedValue({ _avg: { rating: 4.5 } }),
       },
+      auction: { count: jest.fn().mockResolvedValue(0) },
     };
 
     // A real EventIdempotencyService, backed by a fake PrismaService —
@@ -122,6 +124,23 @@ describe('SearchSyncConsumer', () => {
           inStock: true, // 10 available - 2 reserved > 0
         }),
       ],
+      { primaryKey: 'id' },
+    );
+  });
+
+  it('hasActiveAuction reflects a live/upcoming auction on the product, not just any past one', async () => {
+    tx.auction.count.mockResolvedValue(1);
+
+    await consumer.process(buildJob({ eventType: PRODUCT_CREATED_EVENT }));
+
+    expect(tx.auction.count).toHaveBeenCalledWith({
+      where: {
+        productId: 'product-1',
+        status: { in: ['ACTIVE', 'SCHEDULED'] },
+      },
+    });
+    expect(addDocuments).toHaveBeenCalledWith(
+      [expect.objectContaining({ hasActiveAuction: true })],
       { primaryKey: 'id' },
     );
   });

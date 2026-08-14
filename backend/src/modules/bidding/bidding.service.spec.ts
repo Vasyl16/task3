@@ -36,6 +36,7 @@ function buildAuction(overrides: Partial<Auction> = {}): Auction {
     id: 'auction-1',
     productId: 'product-1',
     sellerId: 'seller-profile-1',
+    quantity: 1,
     startingPrice: '100.00' as unknown as Auction['startingPrice'],
     minBidIncrement: '10.00' as unknown as Auction['minBidIncrement'],
     currentHighestBid: null,
@@ -59,6 +60,7 @@ function buildProduct(overrides: Partial<Product> = {}): Product {
     name: 'Rare Widget',
     slug: 'rare-widget',
     description: null,
+    imageUrl: null,
     basePrice: '0' as unknown as Product['basePrice'],
     type: ProductType.AUCTION,
     status: ProductStatus.ACTIVE,
@@ -74,9 +76,17 @@ function buildProduct(overrides: Partial<Product> = {}): Product {
 describe('BiddingService', () => {
   let biddingService: BiddingService;
   let biddingRepository: jest.Mocked<BiddingRepository>;
-  let productsService: jest.Mocked<Pick<ProductsService, 'findById'>>;
+  let productsService: jest.Mocked<
+    Pick<
+      ProductsService,
+      | 'findById'
+      | 'findManyWithInventoryForCheckout'
+      | 'reserveStockForAuction'
+      | 'releaseAuctionReservation'
+    >
+  >;
   let sellersService: jest.Mocked<
-    Pick<SellersService, 'getOwnApprovedSellerProfileOrThrow'>
+    Pick<SellersService, 'getOwnApprovedSellerProfileOrThrow' | 'findByUserId'>
   >;
   let outboxService: jest.Mocked<Pick<OutboxService, 'record'>>;
   let queueService: jest.Mocked<Pick<QueueService, 'scheduleDelayed'>>;
@@ -87,14 +97,37 @@ describe('BiddingService', () => {
 
     biddingRepository = {
       findAuctionById: jest.fn(),
-      findAuctions: jest.fn(),
+      // Defaults to "no other auction exists for this product" so every
+      // existing createAuction test (none of which care about this)
+      // stays unaffected; the one-live-auction-per-product tests
+      // override this per-case.
+      findAuctions: jest.fn().mockResolvedValue([]),
+      findAuctionsForBidder: jest.fn(),
       createAuction: jest.fn(),
       listBidsForAuction: jest.fn(),
       tryAcceptBid: jest.fn(),
       transitionStatusIfCurrent: jest.fn(),
     };
-    productsService = { findById: jest.fn() };
-    sellersService = { getOwnApprovedSellerProfileOrThrow: jest.fn() };
+    productsService = {
+      findById: jest.fn(),
+      // Defaults to "plenty of stock" so every existing createAuction
+      // test stays unaffected; the stock-validation tests override this
+      // per-case.
+      findManyWithInventoryForCheckout: jest
+        .fn()
+        .mockResolvedValue([
+          { inventory: { quantityAvailable: 999, quantityReserved: 0 } },
+        ]),
+      reserveStockForAuction: jest.fn(),
+      releaseAuctionReservation: jest.fn(),
+    };
+    sellersService = {
+      getOwnApprovedSellerProfileOrThrow: jest.fn(),
+      // Defaults to "caller has no seller profile" (the common bidder
+      // case) so every existing placeBid test below stays unaffected;
+      // the self-bid tests override this per-case.
+      findByUserId: jest.fn().mockResolvedValue(null),
+    };
     outboxService = { record: jest.fn() };
     queueService = { scheduleDelayed: jest.fn() };
 
@@ -127,6 +160,22 @@ describe('BiddingService', () => {
     jest.useRealTimers();
   });
 
+  describe('findAuctionsForBidder', () => {
+    it('delegates to the repository with the caller’s own id', async () => {
+      const auctions = [{ id: 'auction-1' }] as unknown as Awaited<
+        ReturnType<typeof biddingService.findAuctionsForBidder>
+      >;
+      biddingRepository.findAuctionsForBidder.mockResolvedValue(auctions);
+
+      const result = await biddingService.findAuctionsForBidder('bidder-1');
+
+      expect(biddingRepository.findAuctionsForBidder).toHaveBeenCalledWith(
+        'bidder-1',
+      );
+      expect(result).toBe(auctions);
+    });
+  });
+
   describe('createAuction', () => {
     it('derives sellerId from the caller and schedules the deadline job', async () => {
       sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue({
@@ -137,13 +186,14 @@ describe('BiddingService', () => {
 
       await biddingService.createAuction('user-1', {
         productId: 'product-1',
+        quantity: 1,
         startingPrice: 100,
         minBidIncrement: 10,
         startsAt: new Date(NOW_MS).toISOString(),
         endsAt: new Date(NOW_MS + 3_600_000).toISOString(),
       });
 
-      const [createArg] = biddingRepository.createAuction.mock.calls[0];
+      const [, createArg] = biddingRepository.createAuction.mock.calls[0];
       expect(createArg.sellerId).toBe('seller-profile-1');
       expect(queueService.scheduleDelayed).toHaveBeenCalledWith(
         QueueName.AUCTION_DEADLINES,
@@ -151,6 +201,212 @@ describe('BiddingService', () => {
         { auctionId: 'auction-1' },
         new Date(NOW_MS + 3_600_000),
       );
+    });
+
+    // Search indexes "is this product currently biddable?" — without
+    // this, a freshly-created auction's product would keep showing as
+    // if it had no live auction until some unrelated product edit
+    // happened to trigger a resync.
+    it('records a ProductUpdated event in the same transaction, so search re-syncs the product as biddable', async () => {
+      sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue({
+        id: 'seller-profile-1',
+      } as SellerProfile);
+      productsService.findById.mockResolvedValue(buildProduct());
+      biddingRepository.createAuction.mockResolvedValue(buildAuction());
+
+      await biddingService.createAuction('user-1', {
+        productId: 'product-1',
+        quantity: 1,
+        startingPrice: 100,
+        minBidIncrement: 10,
+        startsAt: new Date(NOW_MS).toISOString(),
+        endsAt: new Date(NOW_MS + 3_600_000).toISOString(),
+      });
+
+      expect(outboxService.record).toHaveBeenCalledWith(
+        fakeTx,
+        expect.objectContaining({
+          aggregateType: 'Product',
+          aggregateId: 'product-1',
+          eventType: 'ProductUpdated',
+          payload: { productId: 'product-1' },
+        }),
+      );
+    });
+
+    describe('one live auction per product', () => {
+      it.each(['ACTIVE', 'SCHEDULED'] as const)(
+        'rejects a new auction when the product already has an %s one',
+        async (status) => {
+          sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue({
+            id: 'seller-profile-1',
+          } as SellerProfile);
+          productsService.findById.mockResolvedValue(buildProduct());
+          biddingRepository.findAuctions.mockResolvedValue([
+            buildAuction({ id: 'existing-auction', status }),
+          ]);
+
+          await expect(
+            biddingService.createAuction('user-1', {
+              productId: 'product-1',
+              quantity: 1,
+              startingPrice: 100,
+              minBidIncrement: 10,
+              startsAt: new Date(NOW_MS).toISOString(),
+              endsAt: new Date(NOW_MS + 3_600_000).toISOString(),
+            }),
+          ).rejects.toBeInstanceOf(BadRequestException);
+          expect(biddingRepository.createAuction).not.toHaveBeenCalled();
+        },
+      );
+
+      // A COMPLETED/EXPIRED/CANCELLED auction on the product is history,
+      // not a live listing — it must never block re-listing.
+      it.each(['ENDED', 'COMPLETED', 'EXPIRED', 'CANCELLED'] as const)(
+        'allows a new auction when the product’s only other auction is %s',
+        async (status) => {
+          sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue({
+            id: 'seller-profile-1',
+          } as SellerProfile);
+          productsService.findById.mockResolvedValue(buildProduct());
+          biddingRepository.findAuctions.mockResolvedValue([
+            buildAuction({ id: 'past-auction', status }),
+          ]);
+          biddingRepository.createAuction.mockResolvedValue(buildAuction());
+
+          await expect(
+            biddingService.createAuction('user-1', {
+              productId: 'product-1',
+              quantity: 1,
+              startingPrice: 100,
+              minBidIncrement: 10,
+              startsAt: new Date(NOW_MS).toISOString(),
+              endsAt: new Date(NOW_MS + 3_600_000).toISOString(),
+            }),
+          ).resolves.toBeDefined();
+        },
+      );
+    });
+
+    describe('stock validation', () => {
+      it('rejects an auction quantity greater than the product’s available stock', async () => {
+        sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue({
+          id: 'seller-profile-1',
+        } as SellerProfile);
+        productsService.findById.mockResolvedValue(buildProduct());
+        productsService.findManyWithInventoryForCheckout.mockResolvedValue([
+          {
+            inventory: { quantityAvailable: 2, quantityReserved: 0 },
+          } as never,
+        ]);
+
+        await expect(
+          biddingService.createAuction('user-1', {
+            productId: 'product-1',
+            quantity: 3,
+            startingPrice: 100,
+            minBidIncrement: 10,
+            startsAt: new Date(NOW_MS).toISOString(),
+            endsAt: new Date(NOW_MS + 3_600_000).toISOString(),
+          }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(biddingRepository.createAuction).not.toHaveBeenCalled();
+      });
+
+      // quantityReserved is a denormalized cache of auction claims, not
+      // the source of truth. A drifted one (written by an older version
+      // of the stock code, say) must NOT be able to veto an auction the
+      // seller's real stock and real auctions both allow.
+      it('ignores quantityReserved entirely — a stale counter can’t block an auction', async () => {
+        sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue({
+          id: 'seller-profile-1',
+        } as SellerProfile);
+        productsService.findById.mockResolvedValue(buildProduct());
+        // 5 physically in stock, no auction holds any of them — but the
+        // reserved counter wrongly claims 4 are spoken for.
+        productsService.findManyWithInventoryForCheckout.mockResolvedValue([
+          {
+            inventory: { quantityAvailable: 5, quantityReserved: 4 },
+          } as never,
+        ]);
+        biddingRepository.createAuction.mockResolvedValue(
+          buildAuction({ quantity: 5 }),
+        );
+
+        await biddingService.createAuction('user-1', {
+          productId: 'product-1',
+          quantity: 5,
+          startingPrice: 100,
+          minBidIncrement: 10,
+          startsAt: new Date(NOW_MS).toISOString(),
+          endsAt: new Date(NOW_MS + 3_600_000).toISOString(),
+        });
+
+        const [, createArg] = biddingRepository.createAuction.mock.calls[0];
+        expect(createArg.quantity).toBe(5);
+      });
+
+      // An ENDED auction's winner still has an open checkout window, so
+      // those units genuinely aren't free — and that's decided from the
+      // auction row, not the counter.
+      it('subtracts units still claimed by an ENDED auction awaiting checkout', async () => {
+        sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue({
+          id: 'seller-profile-1',
+        } as SellerProfile);
+        productsService.findById.mockResolvedValue(buildProduct());
+        biddingRepository.findAuctions.mockResolvedValue([
+          buildAuction({
+            id: 'ended-auction',
+            status: AuctionStatus.ENDED,
+            quantity: 3,
+          }),
+        ]);
+        // 5 in stock, 3 still claimed by the ENDED auction => 2 free.
+        productsService.findManyWithInventoryForCheckout.mockResolvedValue([
+          {
+            inventory: { quantityAvailable: 5, quantityReserved: 3 },
+          } as never,
+        ]);
+
+        await expect(
+          biddingService.createAuction('user-1', {
+            productId: 'product-1',
+            quantity: 3,
+            startingPrice: 100,
+            minBidIncrement: 10,
+            startsAt: new Date(NOW_MS).toISOString(),
+            endsAt: new Date(NOW_MS + 3_600_000).toISOString(),
+          }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(biddingRepository.createAuction).not.toHaveBeenCalled();
+      });
+
+      it('accepts a quantity that exactly matches available stock', async () => {
+        sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue({
+          id: 'seller-profile-1',
+        } as SellerProfile);
+        productsService.findById.mockResolvedValue(buildProduct());
+        productsService.findManyWithInventoryForCheckout.mockResolvedValue([
+          {
+            inventory: { quantityAvailable: 5, quantityReserved: 0 },
+          } as never,
+        ]);
+        biddingRepository.createAuction.mockResolvedValue(
+          buildAuction({ quantity: 5 }),
+        );
+
+        await biddingService.createAuction('user-1', {
+          productId: 'product-1',
+          quantity: 5,
+          startingPrice: 100,
+          minBidIncrement: 10,
+          startsAt: new Date(NOW_MS).toISOString(),
+          endsAt: new Date(NOW_MS + 3_600_000).toISOString(),
+        });
+
+        const [, createArg] = biddingRepository.createAuction.mock.calls[0];
+        expect(createArg.quantity).toBe(5);
+      });
     });
 
     it('starts ACTIVE immediately when startsAt is now/past, with no start job scheduled', async () => {
@@ -162,13 +418,14 @@ describe('BiddingService', () => {
 
       await biddingService.createAuction('user-1', {
         productId: 'product-1',
+        quantity: 1,
         startingPrice: 100,
         minBidIncrement: 10,
         startsAt: new Date(NOW_MS).toISOString(),
         endsAt: new Date(NOW_MS + 3_600_000).toISOString(),
       });
 
-      const [createArg] = biddingRepository.createAuction.mock.calls[0];
+      const [, createArg] = biddingRepository.createAuction.mock.calls[0];
       expect(createArg.status).toBe(AuctionStatus.ACTIVE);
       expect(queueService.scheduleDelayed).not.toHaveBeenCalledWith(
         QueueName.AUCTION_DEADLINES,
@@ -190,13 +447,14 @@ describe('BiddingService', () => {
       const futureStart = new Date(NOW_MS + 60_000);
       await biddingService.createAuction('user-1', {
         productId: 'product-1',
+        quantity: 1,
         startingPrice: 100,
         minBidIncrement: 10,
         startsAt: futureStart.toISOString(),
         endsAt: new Date(NOW_MS + 3_600_000).toISOString(),
       });
 
-      const [createArg] = biddingRepository.createAuction.mock.calls[0];
+      const [, createArg] = biddingRepository.createAuction.mock.calls[0];
       expect(createArg.status).toBe(AuctionStatus.SCHEDULED);
       expect(queueService.scheduleDelayed).toHaveBeenCalledWith(
         QueueName.AUCTION_DEADLINES,
@@ -217,6 +475,7 @@ describe('BiddingService', () => {
       await expect(
         biddingService.createAuction('attacker', {
           productId: 'product-1',
+          quantity: 1,
           startingPrice: 100,
           minBidIncrement: 10,
           startsAt: new Date(NOW_MS).toISOString(),
@@ -236,6 +495,7 @@ describe('BiddingService', () => {
       await expect(
         biddingService.createAuction('user-1', {
           productId: 'product-1',
+          quantity: 1,
           startingPrice: 100,
           minBidIncrement: 10,
           startsAt: new Date(NOW_MS).toISOString(),
@@ -395,6 +655,40 @@ describe('BiddingService', () => {
         biddingService.placeBid('auction-1', 'bidder-1', { amount: 100 }),
       ).rejects.toBeInstanceOf(ConflictException);
     });
+
+    it('rejects a seller bidding on their own auction', async () => {
+      biddingRepository.findAuctionById.mockResolvedValue(
+        buildAuction({ sellerId: 'my-profile' }),
+      );
+      sellersService.findByUserId.mockResolvedValue({
+        id: 'my-profile',
+      } as SellerProfile);
+
+      await expect(
+        biddingService.placeBid('auction-1', 'seller-user-1', { amount: 200 }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(biddingRepository.tryAcceptBid).not.toHaveBeenCalled();
+    });
+
+    it("allows a DIFFERENT seller to bid on someone else's auction", async () => {
+      biddingRepository.findAuctionById.mockResolvedValue(
+        buildAuction({ sellerId: 'other-profile' }),
+      );
+      sellersService.findByUserId.mockResolvedValue({
+        id: 'my-profile', // a seller, just not THIS auction's seller
+      } as SellerProfile);
+      biddingRepository.tryAcceptBid.mockResolvedValue({
+        id: 'bid-1',
+        auctionId: 'auction-1',
+        bidderId: 'seller-user-1',
+        amount: '100.00' as never,
+        placedAt: new Date(NOW_MS),
+      });
+
+      await expect(
+        biddingService.placeBid('auction-1', 'seller-user-1', { amount: 100 }),
+      ).resolves.toMatchObject({ id: 'bid-1' });
+    });
   });
 
   describe('activateAuctionIfDue', () => {
@@ -450,6 +744,17 @@ describe('BiddingService', () => {
           payload: expect.objectContaining({ winningBidderId: 'winner-1' }),
         }),
       );
+      // The product just stopped being biddable — search needs to know,
+      // same as the createAuction case going the other direction.
+      expect(outboxService.record).toHaveBeenCalledWith(
+        fakeTx,
+        expect.objectContaining({
+          aggregateType: 'Product',
+          aggregateId: 'product-1',
+          eventType: 'ProductUpdated',
+          payload: { productId: 'product-1' },
+        }),
+      );
       expect(queueService.scheduleDelayed).toHaveBeenCalledWith(
         QueueName.AUCTION_DEADLINES,
         EXPIRE_CHECKOUT_WINDOW_JOB,
@@ -488,6 +793,92 @@ describe('BiddingService', () => {
 
       expect(outboxService.record).not.toHaveBeenCalled();
       expect(queueService.scheduleDelayed).not.toHaveBeenCalled();
+    });
+  });
+
+  // The lot is HELD (quantityReserved) from creation until it either
+  // becomes a sale or provably never will — never decremented outright,
+  // so an auctioned product keeps showing real stock while bidding runs.
+  describe('auction stock holds', () => {
+    it('holds the lot when the auction is created, without consuming stock', async () => {
+      sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue({
+        id: 'seller-profile-1',
+      } as SellerProfile);
+      productsService.findById.mockResolvedValue(buildProduct());
+      biddingRepository.createAuction.mockResolvedValue(buildAuction());
+
+      await biddingService.createAuction('user-1', {
+        productId: 'product-1',
+        quantity: 3,
+        startingPrice: 100,
+        minBidIncrement: 10,
+        startsAt: new Date(NOW_MS).toISOString(),
+        endsAt: new Date(NOW_MS + 3_600_000).toISOString(),
+      });
+
+      expect(productsService.reserveStockForAuction).toHaveBeenCalledWith(
+        fakeTx,
+        'product-1',
+        3,
+      );
+    });
+
+    it('releases the hold when the auction ends with no bids', async () => {
+      const auction = buildAuction({ quantity: 2 }); // no bids
+      biddingRepository.findAuctionById.mockResolvedValue(auction);
+      biddingRepository.transitionStatusIfCurrent.mockResolvedValue({
+        ...auction,
+        status: AuctionStatus.EXPIRED,
+      });
+
+      await biddingService.endAuction('auction-1');
+
+      expect(productsService.releaseAuctionReservation).toHaveBeenCalledWith(
+        fakeTx,
+        'product-1',
+        2,
+      );
+    });
+
+    // The winner still has a checkout window open — the units stay held
+    // for them, and are only released if that window lapses.
+    it('keeps the hold when the auction ends WITH a winner', async () => {
+      const auction = buildAuction({
+        quantity: 2,
+        currentHighestBid: '150.00' as never,
+        currentHighestBidderId: 'winner-1',
+      });
+      biddingRepository.findAuctionById.mockResolvedValue(auction);
+      biddingRepository.transitionStatusIfCurrent.mockResolvedValue({
+        ...auction,
+        status: AuctionStatus.ENDED,
+      });
+
+      await biddingService.endAuction('auction-1');
+
+      expect(productsService.releaseAuctionReservation).not.toHaveBeenCalled();
+    });
+
+    it('releases the hold when the winner lets their checkout window lapse', async () => {
+      biddingRepository.transitionStatusIfCurrent.mockResolvedValue(
+        buildAuction({ quantity: 4, status: AuctionStatus.EXPIRED }),
+      );
+
+      await biddingService.expireCheckoutWindowIfUnclaimed('auction-1');
+
+      expect(productsService.releaseAuctionReservation).toHaveBeenCalledWith(
+        fakeTx,
+        'product-1',
+        4,
+      );
+    });
+
+    it('releases nothing when a redelivered expiry job finds the auction already moved on', async () => {
+      biddingRepository.transitionStatusIfCurrent.mockResolvedValue(null);
+
+      await biddingService.expireCheckoutWindowIfUnclaimed('auction-1');
+
+      expect(productsService.releaseAuctionReservation).not.toHaveBeenCalled();
     });
   });
 
