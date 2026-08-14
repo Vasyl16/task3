@@ -41,6 +41,59 @@ export const START_AUCTION_JOB = 'start-auction';
 export const END_AUCTION_JOB = 'end-auction';
 export const EXPIRE_CHECKOUT_WINDOW_JOB = 'expire-checkout-window';
 
+// What the PUBLIC auction endpoints return. currentHighestBidderId is
+// deliberately absent: it is a real user id, and serving it to anonymous
+// callers turns "who is winning this lot" into public information — and,
+// across several auctions, a map of who bids on what.
+//
+// Built as an allow-list rather than by deleting the sensitive field, so
+// a column added to Auction later is withheld by default instead of
+// leaking the moment it exists (the same lesson as CatalogProduct).
+export type PublicAuction = Omit<Auction, 'currentHighestBidderId'> & {
+  // Derived per request from the authenticated caller. Anonymous callers
+  // always get false — the answer is about *you*, so there is nothing to
+  // reveal when there is no you.
+  viewerIsHighestBidder: boolean;
+};
+
+// Bid history without bidder identities. Whether a row is the viewer's
+// own is the only thing a client legitimately needs, and it is the only
+// thing that cannot be used to profile anyone else.
+export type PublicBid = Omit<Bid, 'bidderId'> & { isMine: boolean };
+
+function toPublicAuction(auction: Auction, viewerId?: string): PublicAuction {
+  return {
+    id: auction.id,
+    productId: auction.productId,
+    sellerId: auction.sellerId,
+    startingPrice: auction.startingPrice,
+    minBidIncrement: auction.minBidIncrement,
+    quantity: auction.quantity,
+    currentHighestBid: auction.currentHighestBid,
+    status: auction.status,
+    version: auction.version,
+    startsAt: auction.startsAt,
+    endsAt: auction.endsAt,
+    checkoutDeadline: auction.checkoutDeadline,
+    createdAt: auction.createdAt,
+    updatedAt: auction.updatedAt,
+    viewerIsHighestBidder:
+      viewerId !== undefined &&
+      auction.currentHighestBidderId !== null &&
+      auction.currentHighestBidderId === viewerId,
+  };
+}
+
+function toPublicBid(bid: Bid, viewerId?: string): PublicBid {
+  return {
+    id: bid.id,
+    auctionId: bid.auctionId,
+    amount: bid.amount,
+    placedAt: bid.placedAt,
+    isMine: viewerId !== undefined && bid.bidderId === viewerId,
+  };
+}
+
 @Injectable()
 export class BiddingService {
   private readonly logger = new Logger(BiddingService.name);
@@ -55,6 +108,35 @@ export class BiddingService {
     private readonly metrics: MetricsService,
     private readonly prisma: PrismaService,
   ) {}
+
+  // The projection is applied here rather than in the controller for the
+  // same reason as ProductsService.findAllForCatalog: sanitisation belongs
+  // to the module that owns the data, so no future caller can forget it.
+  async findPublicAuctions(
+    filter?: {
+      productId?: string;
+      sellerId?: string;
+    },
+    viewerId?: string,
+  ): Promise<PublicAuction[]> {
+    const auctions = await this.biddingRepository.findAuctions(filter);
+    return auctions.map((auction) => toPublicAuction(auction, viewerId));
+  }
+
+  async findPublicAuctionById(
+    id: string,
+    viewerId?: string,
+  ): Promise<PublicAuction> {
+    return toPublicAuction(await this.findAuctionById(id), viewerId);
+  }
+
+  async listPublicBids(
+    auctionId: string,
+    viewerId?: string,
+  ): Promise<PublicBid[]> {
+    const bids = await this.listBids(auctionId);
+    return bids.map((bid) => toPublicBid(bid, viewerId));
+  }
 
   findAuctions(filter?: {
     productId?: string;
@@ -130,29 +212,21 @@ export class BiddingService {
         );
       }
 
-      // What's free to auction is the real stock count minus the units
-      // this product's OTHER auctions still have a claim on — derived
-      // from the auctions themselves, never from Inventory's
-      // quantityReserved. That counter is a denormalized cache of the
-      // same fact, and a cache that has drifted (or was written by an
-      // older, buggier version of this code) would silently refuse to
-      // auction stock the seller genuinely has. The auction rows are the
-      // source of truth, so they're what this decides on.
+      // What's free to auction is simply quantityAvailable: reserving
+      // MOVES units out of it (see ProductsRepository.reserveStock), so
+      // every other auction's hold — and every unshipped order — has
+      // already been taken out of that number. Subtracting the other
+      // auctions' quantities again here would remove the same units
+      // twice and refuse lots the seller genuinely has.
       //
-      // Only ENDED can contribute here: ACTIVE/SCHEDULED were just
-      // rejected outright, and COMPLETED/EXPIRED/CANCELLED have no
-      // remaining claim. An ENDED auction's winner still holds a
-      // checkout window, so those units are not free to re-auction.
-      const committedToOtherAuctions = existingAuctions
-        .filter((a) => a.status === AuctionStatus.ENDED)
-        .reduce((sum, a) => sum + a.quantity, 0);
-
+      // ACTIVE/SCHEDULED auctions were rejected outright above; an ENDED
+      // auction still holds its lot for the winner's checkout window,
+      // and that hold is already reflected in quantityAvailable.
       const [product] =
         await this.productsService.findManyWithInventoryForCheckout(tx, [
           dto.productId,
         ]);
-      const available =
-        (product?.inventory?.quantityAvailable ?? 0) - committedToOtherAuctions;
+      const available = product?.inventory?.quantityAvailable ?? 0;
       if (dto.quantity > available) {
         throw new BadRequestException(
           available > 0
@@ -161,10 +235,9 @@ export class BiddingService {
         );
       }
 
-      // Hold the lot: the units stay in stock (an auctioned product is
-      // not "out of stock" while it's being bid on) but stop being
-      // sellable through the cart, so the seller can't sell the same
-      // unit twice. Released if the auction ends with no winner or the
+      // Hold the lot: the units move out of quantityAvailable and into
+      // quantityReserved, so they stop being sellable through the cart
+      // and the seller can't sell the same unit twice. Released if the auction ends with no winner or the
       // winner lets their window lapse; converted into a real decrement
       // by OrdersService.checkoutAuctionWin.
       await this.productsService.reserveStockForAuction(

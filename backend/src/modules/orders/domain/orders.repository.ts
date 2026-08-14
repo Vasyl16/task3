@@ -4,18 +4,41 @@ import type {
   OrderItem,
   OrderStatus,
   Prisma,
+  Product,
   SellerOrder,
   SellerOrderStatus,
 } from '@prisma/client';
 
+// Just enough product context to render a line and link to it. Name and
+// image are snapshotted nowhere — unlike unitPrice, which IS snapshotted
+// on the item — so these are the live values and a renamed product shows
+// its current name in order history. That is the intended reading: the
+// link has to lead somewhere real.
+export type OrderItemWithProduct = OrderItem & {
+  product: Pick<Product, 'id' | 'name' | 'slug' | 'imageUrl' | 'status'>;
+};
+
+export type SellerOrderWithItems = SellerOrder & {
+  items: OrderItemWithProduct[];
+};
+
+// What checkout returns: the rows it just created, with no line items
+// loaded. Kept separate from the read model below rather than making
+// checkout re-query for data its caller does not use.
 export type OrderWithSellerOrders = Order & { sellerOrders: SellerOrder[] };
+
+// What the order-history reads return. Items are included so a buyer or
+// seller can see what was actually bought and click through to it.
+export type OrderWithSellerOrderItems = Order & {
+  sellerOrders: SellerOrderWithItems[];
+};
 
 // Minimal parent-order context for a seller's own SellerOrder list — just
 // enough to show which order it's part of and when it was placed,
 // without exposing the buyer's identity or the OTHER sellers' lines from
 // the same multi-vendor order (that's `Order`/`findById`, buyer/admin
 // only).
-export type SellerOrderWithOrderContext = SellerOrder & {
+export type SellerOrderWithOrderContext = SellerOrderWithItems & {
   order: Pick<Order, 'id' | 'status' | 'placedAt'>;
 };
 
@@ -49,8 +72,14 @@ export interface CreateFromCheckoutResult {
 }
 
 export abstract class OrdersRepository {
-  abstract findByBuyerId(buyerId: string): Promise<OrderWithSellerOrders[]>;
-  abstract findById(id: string): Promise<OrderWithSellerOrders | null>;
+  abstract findByBuyerId(buyerId: string): Promise<OrderWithSellerOrderItems[]>;
+  abstract findById(id: string): Promise<OrderWithSellerOrderItems | null>;
+  // Every order, for the admin queue. Deliberately not reachable from
+  // the buyer-facing list, which is always scoped to the caller.
+  abstract findAllForAdmin(filter: {
+    status?: OrderStatus;
+    buyerId?: string;
+  }): Promise<OrderWithSellerOrderItems[]>;
   abstract findSellerOrderById(id: string): Promise<SellerOrder | null>;
   // Seller dashboard's "own SellerOrders" list — scoped by sellerId,
   // never trusted from the client (see OrdersService.findBySellerId).

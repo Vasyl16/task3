@@ -347,9 +347,11 @@ describe('BiddingService', () => {
       });
 
       // An ENDED auction's winner still has an open checkout window, so
-      // those units genuinely aren't free — and that's decided from the
-      // auction row, not the counter.
-      it('subtracts units still claimed by an ENDED auction awaiting checkout', async () => {
+      // those units are not free — but that is already reflected in
+      // quantityAvailable, because holding a lot MOVES units out of it.
+      // The check must not subtract the auction's quantity a second
+      // time; doing so would refuse lots the seller genuinely has.
+      it('treats quantityAvailable as already excluding an ENDED auction’s hold', async () => {
         sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue({
           id: 'seller-profile-1',
         } as SellerProfile);
@@ -361,11 +363,36 @@ describe('BiddingService', () => {
             quantity: 3,
           }),
         ]);
-        // 5 in stock, 3 still claimed by the ENDED auction => 2 free.
+        // 3 already held by the ENDED auction and therefore already out
+        // of quantityAvailable, which reads 2. Those 2 are genuinely
+        // free, so a 2-unit lot must be allowed.
         productsService.findManyWithInventoryForCheckout.mockResolvedValue([
           {
-            inventory: { quantityAvailable: 5, quantityReserved: 3 },
+            inventory: { quantityAvailable: 2, quantityReserved: 3 },
           } as never,
+        ]);
+        biddingRepository.createAuction.mockResolvedValue(buildAuction());
+
+        await biddingService.createAuction('user-1', {
+          productId: 'product-1',
+          quantity: 2,
+          startingPrice: 100,
+          minBidIncrement: 10,
+          startsAt: new Date(NOW_MS).toISOString(),
+          endsAt: new Date(NOW_MS + 3_600_000).toISOString(),
+        });
+
+        expect(biddingRepository.createAuction).toHaveBeenCalled();
+      });
+
+      it('still refuses a lot larger than quantityAvailable', async () => {
+        sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue({
+          id: 'seller-profile-1',
+        } as SellerProfile);
+        productsService.findById.mockResolvedValue(buildProduct());
+        biddingRepository.findAuctions.mockResolvedValue([]);
+        productsService.findManyWithInventoryForCheckout.mockResolvedValue([
+          { inventory: { quantityAvailable: 2, quantityReserved: 3 } } as never,
         ]);
 
         await expect(

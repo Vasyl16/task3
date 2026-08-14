@@ -57,6 +57,10 @@ export abstract class ProductsRepository {
   // OrderItems, or Auctions, and destroying the row would break that
   // history. See ProductsService.archive.
   abstract archive(tx: Prisma.TransactionClient, id: string): Promise<Product>;
+  // The inverse of archive() — a seller putting their own listing back
+  // on sale. Separate from setModerationStatus because it writes NO
+  // audit trail: this is the owner's own decision, not a moderator's.
+  abstract restore(tx: Prisma.TransactionClient, id: string): Promise<Product>;
   // Admin takedown/reinstatement. Writes the visibility change and the
   // audit trail (who/when/why) together — a status change with no record
   // of who made it is exactly what moderation must not produce.
@@ -72,62 +76,47 @@ export abstract class ProductsRepository {
 
   // Checkout support — all three take the caller's transaction client so
   // stock changes commit atomically with order creation. See
-  // OrdersService.checkout / ProductsService.decrementStockForCheckout.
+  // OrdersService.checkout / ProductsService.reserveStockForCheckout.
   abstract findManyWithInventory(
     tx: Prisma.TransactionClient,
     ids: string[],
   ): Promise<ProductWithInventory[]>;
-  // Conditional, atomic decrement guarded by
-  // `WHERE quantityAvailable - quantityReserved >= quantity` — itself
-  // the concurrency guard (see ProductsService for why this is preferred
-  // over a bare optimistic version compare-and-swap here). Returns null
-  // if stock is insufficient, a concurrent checkout already consumed it,
-  // or the units are held by a live auction — never a negative or
-  // oversold quantityAvailable. On success returns the resulting
-  // Inventory row so the caller can record an accurate InventoryUpdated
-  // event without a second read from outside the transaction.
-  abstract decrementStock(
-    tx: Prisma.TransactionClient,
-    productId: string,
-    quantity: number,
-  ): Promise<Inventory | null>;
-  // Holds units for a live auction lot WITHOUT consuming them — stock
-  // stays on hand (and visible as such) until the winner checks out.
-  // Returns null when the product doesn't physically have the units.
-  // Unlike decrementStock this does NOT gate on quantityReserved — see
-  // the implementation for why, and BiddingService.createAuction for
-  // where the "already claimed" question is actually decided.
+  // Conditional, atomic RESERVATION: MOVES units from quantityAvailable
+  // into quantityReserved, guarded by `WHERE quantityAvailable >=
+  // quantity` — itself the concurrency guard (see ProductsService for
+  // why this is preferred over a bare optimistic version compare-and-
+  // swap here). The two counters are disjoint, so "what can still be
+  // bought" is quantityAvailable alone and no caller subtracts anything.
+  //
+  // Serves an order's hold at checkout and an auction lot's hold alike:
+  // both take units off sale until they are shipped or released.
+  // Returns null when stock is insufficient or a concurrent reservation
+  // already claimed it — never a negative quantityAvailable. On success
+  // returns the resulting Inventory row so the caller can record an
+  // accurate InventoryUpdated event without a second read.
   abstract reserveStock(
     tx: Prisma.TransactionClient,
     productId: string,
     quantity: number,
   ): Promise<Inventory | null>;
-  // Frees a reserveStock hold: the auction ended with no winner, the
-  // winner's checkout window lapsed, or the hold is being converted into
-  // a sale. Always called behind a guarded status transition, so it
-  // can't double-release.
+  // Shipping: drops quantityReserved only. quantityAvailable already
+  // came down when the order was placed. Returns null when the
+  // reservation is not there to consume, which is what makes a repeated
+  // ship transition a no-op rather than a double decrement.
+  abstract commitReservation(
+    tx: Prisma.TransactionClient,
+    productId: string,
+    quantity: number,
+  ): Promise<Inventory | null>;
+  // The inverse of reserveStock — a cancelled order or an auction with
+  // no winner puts its units back on sale. Null when there is no such
+  // reservation, so a repeated release cannot invent stock.
   abstract releaseReservation(
     tx: Prisma.TransactionClient,
     productId: string,
     quantity: number,
-  ): Promise<Inventory>;
-  // Restores stock — e.g. when a SellerOrder is cancelled. See
-  // OrdersService.updateSellerOrderStatus. Returns the resulting row for
-  // the same reason decrementStock does.
-  abstract restoreStock(
-    tx: Prisma.TransactionClient,
-    productId: string,
-    quantity: number,
-  ): Promise<Inventory>;
+  ): Promise<Inventory | null>;
 
-  // Seller-initiated stock correction (via ProductsService.update) —
-  // distinct from decrementStock/restoreStock's relative adjustments:
-  // this sets quantityAvailable to an absolute value the seller chose.
-  // Still optimistically locked on `version` (see backend.md — never a
-  // naive read-then-write on inventory): returns null if the row's
-  // version has moved since it was read inside this same transaction
-  // (a concurrent checkout/restore committed in between), so the caller
-  // can reject the request rather than silently clobber it.
   abstract setStock(
     tx: Prisma.TransactionClient,
     productId: string,

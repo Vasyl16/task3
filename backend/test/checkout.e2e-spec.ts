@@ -189,15 +189,47 @@ describe('Checkout (e2e, real database)', () => {
       ]),
     );
 
-    // Correct inventory decrement, read back from Postgres.
+    // Checkout MOVES units from quantityAvailable into
+    // quantityReserved. The two counters are disjoint, so
+    // quantityAvailable alone answers "what can still be bought" — and a
+    // seller looking at their stock sees the reduction immediately
+    // rather than a figure that silently includes sold units.
     const inventoryA = await prisma.inventory.findUnique({
       where: { productId: productA.id },
     });
     const inventoryB = await prisma.inventory.findUnique({
       where: { productId: productB.id },
     });
-    expect(inventoryA?.quantityAvailable).toBe(3); // 5 - 2
-    expect(inventoryB?.quantityAvailable).toBe(4); // 5 - 1
+    expect(inventoryA?.quantityAvailable).toBe(3); // 5 - 2, held
+    expect(inventoryA?.quantityReserved).toBe(2);
+    expect(inventoryB?.quantityAvailable).toBe(4); // 5 - 1, held
+    expect(inventoryB?.quantityReserved).toBe(1);
+
+    // Shipping consumes the hold: quantityReserved drops and
+    // quantityAvailable stays where checkout left it — the units were
+    // taken off sale when the order was placed, not when it shipped.
+    const sellerOrderA = (
+      checkoutRes.body.sellerOrders as Array<{ id: string; sellerId: string }>
+    ).find((so) => so.sellerId === sellerA.sellerProfileId);
+    // NEW -> PROCESSING -> SHIPPED: the intermediate step is normally
+    // applied asynchronously by OrderProcessingConsumer, so it is done
+    // explicitly here rather than waiting on a queue.
+    await request(app.getHttpServer())
+      .patch(`/orders/seller-orders/${sellerOrderA!.id}/status`)
+      .set(...authHeader(sellerA.user))
+      .send({ status: 'PROCESSING' })
+      .expect(200);
+    await request(app.getHttpServer())
+      .patch(`/orders/seller-orders/${sellerOrderA!.id}/status`)
+      .set(...authHeader(sellerA.user))
+      .send({ status: 'SHIPPED' })
+      .expect(200);
+
+    const shippedA = await prisma.inventory.findUnique({
+      where: { productId: productA.id },
+    });
+    expect(shippedA?.quantityAvailable).toBe(3); // unchanged by shipping
+    expect(shippedA?.quantityReserved).toBe(0);
 
     // Cart cleared.
     const cartRes = await request(app.getHttpServer())
@@ -374,10 +406,11 @@ describe('Checkout (e2e, real database)', () => {
     });
     expect(orderCount).toBe(1);
 
-    // Only decremented once, not twice.
+    // Only reserved once, not twice.
     const inventory = await prisma.inventory.findUnique({
       where: { productId: product.id },
     });
     expect(inventory?.quantityAvailable).toBe(9); // 10 - 1, not 10 - 2
+    expect(inventory?.quantityReserved).toBe(1);
   }, 20000);
 });

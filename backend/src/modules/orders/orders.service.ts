@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  OrderStatus,
   LedgerEntryType,
   ProductStatus,
   ProductType,
@@ -31,6 +32,7 @@ import { isValidSellerOrderTransition } from './domain/order-status-transitions'
 import {
   CheckoutSellerLineInput,
   OrdersRepository,
+  OrderWithSellerOrderItems,
   OrderWithSellerOrders,
   SellerOrderWithOrderContext,
 } from './domain/orders.repository';
@@ -70,7 +72,7 @@ export class OrdersService {
     private readonly prisma: PrismaService,
   ) {}
 
-  findByBuyerId(buyerId: string): Promise<OrderWithSellerOrders[]> {
+  findByBuyerId(buyerId: string): Promise<OrderWithSellerOrderItems[]> {
     return this.ordersRepository.findByBuyerId(buyerId);
   }
 
@@ -86,10 +88,18 @@ export class OrdersService {
     return this.ordersRepository.findBySellerId(sellerProfile.id);
   }
 
+  // Admin-only; @Roles(ADMIN) is enforced on AdminController.
+  listForAdmin(filter: {
+    status?: OrderStatus;
+    buyerId?: string;
+  }): Promise<OrderWithSellerOrderItems[]> {
+    return this.ordersRepository.findAllForAdmin(filter);
+  }
+
   async findById(
     id: string,
     caller: AuthenticatedUser,
-  ): Promise<OrderWithSellerOrders> {
+  ): Promise<OrderWithSellerOrderItems> {
     const order = await this.ordersRepository.findById(id);
     if (!order) {
       throw new NotFoundException(`Order ${id} not found`);
@@ -292,22 +302,19 @@ export class OrdersService {
         quantity: auction.quantity,
         unitPrice: Number(auction.currentHighestBid) / auction.quantity,
       };
-      // The lot has been held (not consumed) since the auction was
-      // created — see BiddingService.createAuction. Release the hold
-      // FIRST so the decrement below sees these units as free: its guard
-      // is `quantityAvailable - quantityReserved >= quantity`, which this
-      // auction's own reservation would otherwise fail. Same transaction,
-      // so the pair can't half-apply.
-      await this.productsService.releaseAuctionReservation(
-        tx,
-        auction.productId,
-        auction.quantity,
-      );
+      // The lot has been held since the auction was created (see
+      // BiddingService.createAuction), and a checkout reservation is the
+      // same counter — so the hold simply BECOMES this order's
+      // reservation. Releasing it and immediately re-reserving would be
+      // a no-op numerically while opening a window where the units look
+      // free, so the hold is carried over instead. Either way it is the
+      // seller shipping that finally consumes the stock.
       const result = await this.executeOrderTransaction(
         tx,
         callerId,
         [line],
         correlationId,
+        true,
       );
 
       await this.biddingService.markAuctionCompleted(tx, auctionId);
@@ -327,16 +334,25 @@ export class OrdersService {
     buyerId: string,
     lines: CheckoutLine[],
     correlationId: string,
+    stockAlreadyReserved = false,
   ): Promise<OrderWithSellerOrders> {
-    // 6. Atomically decrement stock for every line. The first
+    // 6. Atomically RESERVE stock for every line. The first
     // insufficient/conflicting line throws, aborting the whole
-    // transaction — no partial decrement survives.
-    for (const line of lines) {
-      await this.productsService.decrementStockForCheckout(
-        tx,
-        line.productId,
-        line.quantity,
-      );
+    // transaction — no partial reservation survives. Units are not
+    // consumed here; the seller shipping is what does that (see
+    // updateSellerOrderStatus).
+    //
+    // Auction wins arrive here with their units already reserved by the
+    // auction hold, which simply carries over to the order rather than
+    // being released and immediately re-taken.
+    if (!stockAlreadyReserved) {
+      for (const line of lines) {
+        await this.productsService.reserveStockForCheckout(
+          tx,
+          line.productId,
+          line.quantity,
+        );
+      }
     }
 
     // 8. Split items by seller.
@@ -472,8 +488,8 @@ export class OrdersService {
 
     const correlationId = this.correlationIdService.getId() ?? randomUUID();
 
-    const { result, restoredUnits } = await this.prisma.$transaction(
-      async (tx) => {
+    const { result, restoredUnits, committedUnits } =
+      await this.prisma.$transaction(async (tx) => {
         const updated = await this.ordersRepository.updateSellerOrderStatus(
           tx,
           id,
@@ -481,21 +497,34 @@ export class OrdersService {
         );
 
         let restored = 0;
+        let committed = 0;
         if (dto.status === SellerOrderStatus.CANCELLED) {
           restored = await this.restoreStockAndReverseLedger(tx, updated);
+        } else if (dto.status === SellerOrderStatus.SHIPPED) {
+          // Shipping is what finally consumes the stock the order has
+          // been holding since checkout. Same transaction as the status
+          // write, so a SellerOrder can never be SHIPPED without its
+          // units having been committed.
+          committed = await this.commitReservedStock(tx, updated);
         }
 
         const order = await this.recomputeOrderStatus(tx, updated.orderId);
 
         await this.recordStatusChanged(tx, updated, order, correlationId);
 
-        return { result: updated, restoredUnits: restored };
-      },
-    );
+        return {
+          result: updated,
+          restoredUnits: restored,
+          committedUnits: committed,
+        };
+      });
 
     if (restoredUnits > 0) {
       // Again after commit, for the same reason as checkout.
-      this.metrics.recordInventoryMovement('restored', restoredUnits);
+      this.metrics.recordInventoryMovement('released', restoredUnits);
+    }
+    if (committedUnits > 0) {
+      this.metrics.recordInventoryMovement('committed', committedUnits);
     }
     this.logger.log({
       event: 'seller_order.status_changed',
@@ -570,6 +599,30 @@ export class OrdersService {
   // schema.prisma), so this reverses rather than mutates.
   // Returns the number of units put back, so the caller can record the
   // metric AFTER the transaction commits (see updateSellerOrderStatus).
+  // Converts every line's checkout hold into a real stock reduction.
+  // Lines whose reservation is already gone (a re-run transition) are
+  // skipped rather than decremented again — see
+  // ProductsService.commitReservationForShipment.
+  private async commitReservedStock(
+    tx: Prisma.TransactionClient,
+    sellerOrder: SellerOrder,
+  ): Promise<number> {
+    const items = await this.ordersRepository.findOrderItemsForSellerOrder(
+      tx,
+      sellerOrder.id,
+    );
+    let committedUnits = 0;
+    for (const item of items) {
+      const applied = await this.productsService.commitReservationForShipment(
+        tx,
+        item.productId,
+        item.quantity,
+      );
+      if (applied) committedUnits += item.quantity;
+    }
+    return committedUnits;
+  }
+
   private async restoreStockAndReverseLedger(
     tx: Prisma.TransactionClient,
     sellerOrder: SellerOrder,
@@ -580,7 +633,9 @@ export class OrdersService {
     );
     let restoredUnits = 0;
     for (const item of items) {
-      await this.productsService.restoreStock(
+      // Released, not restored: a cancelled order's units never left
+      // quantityAvailable in the first place.
+      await this.productsService.releaseReservationForCancellation(
         tx,
         item.productId,
         item.quantity,

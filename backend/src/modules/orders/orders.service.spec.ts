@@ -145,8 +145,9 @@ describe('OrdersService', () => {
     Pick<
       ProductsService,
       | 'findManyWithInventoryForCheckout'
-      | 'decrementStockForCheckout'
-      | 'restoreStock'
+      | 'reserveStockForCheckout'
+      | 'commitReservationForShipment'
+      | 'releaseReservationForCancellation'
       | 'releaseAuctionReservation'
     >
   >;
@@ -162,6 +163,7 @@ describe('OrdersService', () => {
   beforeEach(async () => {
     ordersRepository = {
       findByBuyerId: jest.fn(),
+      findAllForAdmin: jest.fn().mockResolvedValue([]),
       findById: jest.fn(),
       findSellerOrderById: jest.fn(),
       createFromCheckout: jest.fn(),
@@ -186,8 +188,9 @@ describe('OrdersService', () => {
     };
     productsService = {
       findManyWithInventoryForCheckout: jest.fn(),
-      decrementStockForCheckout: jest.fn(),
-      restoreStock: jest.fn(),
+      reserveStockForCheckout: jest.fn(),
+      commitReservationForShipment: jest.fn().mockResolvedValue(true),
+      releaseReservationForCancellation: jest.fn(),
       releaseAuctionReservation: jest.fn(),
     };
     outboxService = { record: jest.fn() };
@@ -267,6 +270,7 @@ describe('OrdersService', () => {
       ordersRepository.findBySellerId.mockResolvedValue([
         {
           ...buildSellerOrder({ id: 'so-1', sellerId: 'seller-profile-1' }),
+          items: [],
           order: {
             id: 'order-1',
             status: SellerOrderStatus.NEW,
@@ -353,7 +357,7 @@ describe('OrdersService', () => {
           inventory: { quantityAvailable: 10 } as never,
         }),
       ]);
-      productsService.decrementStockForCheckout.mockResolvedValue(undefined);
+      productsService.reserveStockForCheckout.mockResolvedValue(undefined);
       sellersService.findById.mockImplementation((id: string) =>
         Promise.resolve(buildSellerProfile({ id, userId: `${id}-user` })),
       );
@@ -388,20 +392,18 @@ describe('OrdersService', () => {
 
       // Correct inventory decrement: one call per line item, every
       // product in the cart.
-      expect(productsService.decrementStockForCheckout).toHaveBeenCalledTimes(
-        3,
-      );
-      expect(productsService.decrementStockForCheckout).toHaveBeenCalledWith(
+      expect(productsService.reserveStockForCheckout).toHaveBeenCalledTimes(3);
+      expect(productsService.reserveStockForCheckout).toHaveBeenCalledWith(
         fakeTx,
         'product-a',
         2,
       );
-      expect(productsService.decrementStockForCheckout).toHaveBeenCalledWith(
+      expect(productsService.reserveStockForCheckout).toHaveBeenCalledWith(
         fakeTx,
         'product-b',
         1,
       );
-      expect(productsService.decrementStockForCheckout).toHaveBeenCalledWith(
+      expect(productsService.reserveStockForCheckout).toHaveBeenCalledWith(
         fakeTx,
         'product-c',
         3,
@@ -497,7 +499,7 @@ describe('OrdersService', () => {
       await expect(ordersService.checkout('buyer-1')).rejects.toBeInstanceOf(
         BadRequestException,
       );
-      expect(productsService.decrementStockForCheckout).not.toHaveBeenCalled();
+      expect(productsService.reserveStockForCheckout).not.toHaveBeenCalled();
     });
 
     // Transaction rollback: if the atomic decrement conflicts (e.g. a
@@ -519,7 +521,7 @@ describe('OrdersService', () => {
           inventory: { quantityAvailable: 10 } as never,
         }),
       ]);
-      productsService.decrementStockForCheckout
+      productsService.reserveStockForCheckout
         .mockResolvedValueOnce(undefined)
         .mockRejectedValueOnce(
           new Error('Insufficient stock for product product-b'),
@@ -558,7 +560,7 @@ describe('OrdersService', () => {
           inventory: { quantityAvailable: 10, quantityReserved: 0 } as never,
         }),
       ]);
-      productsService.decrementStockForCheckout.mockResolvedValue(undefined);
+      productsService.reserveStockForCheckout.mockResolvedValue(undefined);
       sellersService.findById.mockResolvedValue(
         buildSellerProfile({ id: 'seller-profile-1' }),
       );
@@ -570,38 +572,31 @@ describe('OrdersService', () => {
 
     // A single-unit lot (the common case) is exactly the winning bid —
     // no division, so no rounding question even arises.
-    it('a single-unit win checks out at exactly the winning bid, decrementing 1 unit of stock', async () => {
+    it('a single-unit win checks out at exactly the winning bid, for 1 unit', async () => {
       biddingService.findAuctionById.mockResolvedValue(
         buildAuction({ quantity: 1, currentHighestBid: '100.00' as never }),
       );
 
       await ordersService.checkoutAuctionWin('auction-1', 'buyer-1');
 
-      expect(productsService.decrementStockForCheckout).toHaveBeenCalledWith(
-        fakeTx,
-        'product-1',
-        1,
-      );
       const [, checkoutInput] =
         ordersRepository.createFromCheckout.mock.calls[0];
+      // The order line carries the lot size, which is what the shipment
+      // will later commit against the auction's existing hold.
+      expect(checkoutInput.sellerLines[0].items[0].quantity).toBe(1);
       expect(checkoutInput.sellerLines[0].subtotal).toBe(100);
     });
 
     // The winning bid is a LOT price for the whole quantity, not a
     // per-unit price — decrementing `quantity` units at `bid / quantity`
     // each must still total back to the actual amount the winner bid.
-    it('a multi-unit win decrements the full lot size and totals back to the winning bid', async () => {
+    it('a multi-unit win carries the full lot size and totals back to the winning bid', async () => {
       biddingService.findAuctionById.mockResolvedValue(
         buildAuction({ quantity: 4, currentHighestBid: '100.00' as never }),
       );
 
       await ordersService.checkoutAuctionWin('auction-1', 'buyer-1');
 
-      expect(productsService.decrementStockForCheckout).toHaveBeenCalledWith(
-        fakeTx,
-        'product-1',
-        4,
-      );
       const [, checkoutInput] =
         ordersRepository.createFromCheckout.mock.calls[0];
       expect(checkoutInput.sellerLines[0].subtotal).toBe(100);
@@ -612,27 +607,20 @@ describe('OrdersService', () => {
       });
     });
 
-    // The lot has been held since the auction was created, and that hold
-    // is counted against sellable stock — so it has to come off BEFORE
-    // the decrement, or a win covering all remaining stock would be
-    // blocked by its own reservation.
-    it('releases the auction hold before decrementing the units it covers', async () => {
+    // The lot has been held since the auction was created, and a checkout
+    // reservation is that same counter — so the hold simply BECOMES the
+    // order's reservation. Releasing and immediately re-reserving would
+    // net to nothing while briefly making the units look free, so the
+    // win must do neither.
+    it('carries the auction hold over into the order instead of releasing and re-reserving it', async () => {
       biddingService.findAuctionById.mockResolvedValue(
         buildAuction({ quantity: 2 }),
       );
 
       await ordersService.checkoutAuctionWin('auction-1', 'buyer-1');
 
-      expect(productsService.releaseAuctionReservation).toHaveBeenCalledWith(
-        fakeTx,
-        'product-1',
-        2,
-      );
-      const releaseOrder =
-        productsService.releaseAuctionReservation.mock.invocationCallOrder[0];
-      const decrementOrder =
-        productsService.decrementStockForCheckout.mock.invocationCallOrder[0];
-      expect(releaseOrder).toBeLessThan(decrementOrder);
+      expect(productsService.releaseAuctionReservation).not.toHaveBeenCalled();
+      expect(productsService.reserveStockForCheckout).not.toHaveBeenCalled();
     });
 
     it('marks the auction COMPLETED in the same transaction as the order', async () => {
@@ -665,6 +653,82 @@ describe('OrdersService', () => {
   });
 
   describe('updateSellerOrderStatus', () => {
+    // The whole point of reserve-on-checkout: units sit in
+    // quantityReserved from checkout until the seller actually ships,
+    // and shipping is the only thing that reduces real stock.
+    it('commits the reserved units when the seller ships', async () => {
+      ordersRepository.findSellerOrderById.mockResolvedValue(
+        buildSellerOrder({
+          sellerId: 'my-profile',
+          status: SellerOrderStatus.PROCESSING,
+        }),
+      );
+      sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue(
+        buildSellerProfile({ id: 'my-profile' }),
+      );
+      ordersRepository.updateSellerOrderStatus.mockResolvedValue(
+        buildSellerOrder({ status: SellerOrderStatus.SHIPPED }),
+      );
+      ordersRepository.findOrderItemsForSellerOrder.mockResolvedValue([
+        { productId: 'product-1', quantity: 2 } as never,
+      ]);
+      ordersRepository.findSellerOrderStatusesForOrder.mockResolvedValue([
+        SellerOrderStatus.SHIPPED,
+      ]);
+
+      await ordersService.updateSellerOrderStatus(
+        'so-1',
+        buildCaller({ id: 'seller-user' }),
+        { status: SellerOrderStatus.SHIPPED },
+      );
+
+      expect(productsService.commitReservationForShipment).toHaveBeenCalledWith(
+        fakeTx,
+        'product-1',
+        2,
+      );
+      // Never a plain restock — shipping consumes, it does not return.
+      expect(
+        productsService.releaseReservationForCancellation,
+      ).not.toHaveBeenCalled();
+    });
+
+    // A cancelled order's units never left quantityAvailable, so they
+    // are released, not restored.
+    it('releases the hold when the order is cancelled, and commits nothing', async () => {
+      ordersRepository.findSellerOrderById.mockResolvedValue(
+        buildSellerOrder({
+          sellerId: 'my-profile',
+          status: SellerOrderStatus.PROCESSING,
+        }),
+      );
+      sellersService.getOwnApprovedSellerProfileOrThrow.mockResolvedValue(
+        buildSellerProfile({ id: 'my-profile' }),
+      );
+      ordersRepository.updateSellerOrderStatus.mockResolvedValue(
+        buildSellerOrder({ status: SellerOrderStatus.CANCELLED }),
+      );
+      ordersRepository.findOrderItemsForSellerOrder.mockResolvedValue([
+        { productId: 'product-1', quantity: 2 } as never,
+      ]);
+      ordersRepository.findSellerOrderStatusesForOrder.mockResolvedValue([
+        SellerOrderStatus.CANCELLED,
+      ]);
+
+      await ordersService.updateSellerOrderStatus(
+        'so-1',
+        buildCaller({ id: 'seller-user' }),
+        { status: SellerOrderStatus.CANCELLED },
+      );
+
+      expect(
+        productsService.releaseReservationForCancellation,
+      ).toHaveBeenCalledWith(fakeTx, 'product-1', 2);
+      expect(
+        productsService.commitReservationForShipment,
+      ).not.toHaveBeenCalled();
+    });
+
     it('allows a valid transition (NEW -> PROCESSING) by the owning seller', async () => {
       ordersRepository.findSellerOrderById.mockResolvedValue(
         buildSellerOrder({
@@ -825,17 +889,15 @@ describe('OrdersService', () => {
         { status: SellerOrderStatus.CANCELLED },
       );
 
-      expect(productsService.restoreStock).toHaveBeenCalledWith(
-        fakeTx,
-        'product-a',
-        2,
-      );
-      expect(productsService.restoreStock).toHaveBeenCalledWith(
-        fakeTx,
-        'product-c',
-        3,
-      );
-      expect(productsService.restoreStock).toHaveBeenCalledTimes(2);
+      expect(
+        productsService.releaseReservationForCancellation,
+      ).toHaveBeenCalledWith(fakeTx, 'product-a', 2);
+      expect(
+        productsService.releaseReservationForCancellation,
+      ).toHaveBeenCalledWith(fakeTx, 'product-c', 3);
+      expect(
+        productsService.releaseReservationForCancellation,
+      ).toHaveBeenCalledTimes(2);
       expect(ordersRepository.createLedgerEntries).toHaveBeenCalledWith(
         fakeTx,
         expect.arrayContaining([

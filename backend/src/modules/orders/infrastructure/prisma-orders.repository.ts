@@ -13,26 +13,62 @@ import {
   CreateFromCheckoutInput,
   CreateFromCheckoutResult,
   OrdersRepository,
-  OrderWithSellerOrders,
+  OrderWithSellerOrderItems,
   SellerOrderWithOrderContext,
 } from '../domain/orders.repository';
+
+// The only product fields an order line needs: enough to render it and
+// link to the product page. Deliberately not the whole row — order
+// history has no business exposing a product's moderation trail.
+const PRODUCT_CARD = {
+  select: {
+    id: true,
+    name: true,
+    slug: true,
+    imageUrl: true,
+    status: true,
+  },
+} as const;
 
 @Injectable()
 export class PrismaOrdersRepository implements OrdersRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  findByBuyerId(buyerId: string): Promise<OrderWithSellerOrders[]> {
+  findByBuyerId(buyerId: string): Promise<OrderWithSellerOrderItems[]> {
     return this.prisma.order.findMany({
       where: { buyerId },
-      include: { sellerOrders: true },
+      include: {
+        sellerOrders: {
+          include: { items: { include: { product: PRODUCT_CARD } } },
+        },
+      },
       orderBy: { placedAt: 'desc' },
     });
   }
 
-  findById(id: string): Promise<OrderWithSellerOrders | null> {
+  findById(id: string): Promise<OrderWithSellerOrderItems | null> {
     return this.prisma.order.findUnique({
       where: { id },
-      include: { sellerOrders: true },
+      include: {
+        sellerOrders: {
+          include: { items: { include: { product: PRODUCT_CARD } } },
+        },
+      },
+    });
+  }
+
+  findAllForAdmin(filter: {
+    status?: OrderStatus;
+    buyerId?: string;
+  }): Promise<OrderWithSellerOrderItems[]> {
+    return this.prisma.order.findMany({
+      where: { status: filter.status, buyerId: filter.buyerId },
+      include: {
+        sellerOrders: {
+          include: { items: { include: { product: PRODUCT_CARD } } },
+        },
+      },
+      orderBy: { placedAt: 'desc' },
     });
   }
 
@@ -45,6 +81,7 @@ export class PrismaOrdersRepository implements OrdersRepository {
       where: { sellerId },
       include: {
         order: { select: { id: true, status: true, placedAt: true } },
+        items: { include: { product: PRODUCT_CARD } },
       },
       orderBy: { createdAt: 'desc' },
     });
