@@ -36,14 +36,43 @@ export class PrismaProductsRepository implements ProductsRepository {
     return this.prisma.product.findUnique({ where: { id } });
   }
 
-  findForModeration(filter: {
+  // Search matches an id as well as name and slug: the thing an admin
+  // usually has to hand is an id copied out of a dispute or an order
+  // line, not a product name. Applied in SQL alongside the page, never
+  // to an already-selected page — that would search only the rows that
+  // happened to land on it.
+  async findForModeration(filter: {
     status?: ProductStatus;
     sellerId?: string;
-  }): Promise<Product[]> {
-    return this.prisma.product.findMany({
-      where: { status: filter.status, sellerId: filter.sellerId },
-      orderBy: { createdAt: 'desc' },
-    });
+    search?: string;
+    skip?: number;
+    take?: number;
+  }): Promise<{ items: Product[]; total: number }> {
+    const search = filter.search?.trim();
+    const where: Prisma.ProductWhereInput = {
+      status: filter.status,
+      sellerId: filter.sellerId,
+      ...(search
+        ? {
+            OR: [
+              { name: { contains: search, mode: 'insensitive' } },
+              { slug: { contains: search, mode: 'insensitive' } },
+              { id: { contains: search, mode: 'insensitive' } },
+            ],
+          }
+        : {}),
+    };
+
+    const [items, total] = await Promise.all([
+      this.prisma.product.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: filter.skip,
+        take: filter.take,
+      }),
+      this.prisma.product.count({ where }),
+    ]);
+    return { items, total };
   }
 
   restore(tx: Prisma.TransactionClient, id: string): Promise<Product> {
@@ -207,6 +236,29 @@ export class PrismaProductsRepository implements ProductsRepository {
       RETURNING *
     `;
     return updated ?? null;
+  }
+
+  // A pure restock: quantityAvailable rises, quantityReserved is
+  // untouched. Used only when an admin force-cancels an order that had
+  // already shipped — the hold was already consumed at SHIPMENT (see
+  // commitReservation), so there is nothing left in quantityReserved to
+  // release. This is what actually makes the units sellable again.
+  //
+  // No WHERE guard beyond existence: unlike reserve/commit/release,
+  // there is no invariant to protect against here — adding units back
+  // can never oversell or go negative.
+  returnStock(
+    tx: Prisma.TransactionClient,
+    productId: string,
+    quantity: number,
+  ): Promise<Inventory> {
+    return tx.inventory.update({
+      where: { productId },
+      data: {
+        quantityAvailable: { increment: quantity },
+        version: { increment: 1 },
+      },
+    });
   }
 
   async setStock(

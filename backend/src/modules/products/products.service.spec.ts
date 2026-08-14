@@ -113,6 +113,7 @@ describe('ProductsService', () => {
       reserveStock: jest.fn(),
       commitReservation: jest.fn(),
       releaseReservation: jest.fn(),
+      returnStock: jest.fn(),
       setStock: jest.fn(),
       findForModeration: jest.fn(),
       setModerationStatus: jest.fn(),
@@ -682,15 +683,20 @@ describe('ProductsService', () => {
     });
 
     it('lists archived products too, so a moderator can find what to reinstate', async () => {
-      productsRepository.findForModeration.mockResolvedValue([]);
+      productsRepository.findForModeration.mockResolvedValue({
+        items: [],
+        total: 0,
+      });
 
       await productsService.listForModeration({
         status: ProductStatus.ARCHIVED,
       });
 
-      expect(productsRepository.findForModeration).toHaveBeenCalledWith({
-        status: ProductStatus.ARCHIVED,
-      });
+      // Paginated now: the status filter is still forwarded, alongside
+      // the page window the service derives.
+      expect(productsRepository.findForModeration).toHaveBeenCalledWith(
+        expect.objectContaining({ status: ProductStatus.ARCHIVED }),
+      );
     });
   });
 
@@ -809,6 +815,30 @@ describe('ProductsService', () => {
         'product-1',
         3,
       );
+    });
+
+    // An admin force-cancelling an order that already SHIPPED has no
+    // reservation left to release — SHIPMENT already consumed it. This
+    // is a genuine restock, tagged distinctly (RETURN) so it's not
+    // confused with a pre-ship cancellation in the event stream.
+    it('returnStockAfterForceCancellation restocks directly, tagged RETURN', async () => {
+      productsRepository.returnStock.mockResolvedValue(
+        buildInventory({ quantityAvailable: 10, quantityReserved: 0 }),
+      );
+
+      await productsService.returnStockAfterForceCancellation(
+        fakeTx as never,
+        'product-1',
+        2,
+      );
+
+      expect(productsRepository.returnStock).toHaveBeenCalledWith(
+        fakeTx,
+        'product-1',
+        2,
+      );
+      const [, event] = outboxService.record.mock.calls[0];
+      expect(event.payload).toMatchObject({ reason: 'RETURN' });
     });
 
     // Shipping is the only thing that reduces quantityAvailable now.

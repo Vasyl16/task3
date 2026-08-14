@@ -19,6 +19,9 @@ import { CorrelationIdService } from '../../core/correlation-id/correlation-id.s
 import { PrismaService } from '../../infrastructure/prisma/prisma.service';
 import { OutboxService } from '../../infrastructure/outbox/outbox.service';
 import { ReviewsService } from '../reviews/reviews.service';
+import { toPageParams, type Paginated } from '../../core/pagination';
+import { ListOwnProductsQuery } from './dto/list-own-products.query';
+import { ListProductsForModerationQuery } from '../admin/dto/list-products-for-moderation.query';
 import { CategoriesService } from '../categories/categories.service';
 import { SellersService } from '../sellers/sellers.service';
 import {
@@ -331,14 +334,19 @@ export class ProductsService {
   // the caller's own approved profile, never a client-supplied sellerId.
   async listOwnProducts(
     callerId: string,
-    filter?: { status?: ProductStatus },
-  ): Promise<Product[]> {
+    query: ListOwnProductsQuery,
+  ): Promise<Paginated<Product>> {
     const sellerProfile =
       await this.sellersService.getOwnApprovedSellerProfileOrThrow(callerId);
-    return this.productsRepository.findForModeration({
+    const { skip, take, page, limit } = toPageParams(query);
+    const { items, total } = await this.productsRepository.findForModeration({
       sellerId: sellerProfile.id,
-      status: filter?.status,
+      status: query.status,
+      search: query.search,
+      skip,
+      take,
     });
+    return { items, total, page, limit };
   }
 
   // Puts an archived listing back on sale. The mirror of archive():
@@ -380,11 +388,18 @@ export class ProductsService {
   // Admin-only; @Roles(ADMIN) is enforced on AdminController, and every
   // method here takes the moderator's id from the authenticated caller.
 
-  listForModeration(filter: {
-    status?: ProductStatus;
-    sellerId?: string;
-  }): Promise<Product[]> {
-    return this.productsRepository.findForModeration(filter);
+  async listForModeration(
+    query: ListProductsForModerationQuery,
+  ): Promise<Paginated<Product>> {
+    const { skip, take, page, limit } = toPageParams(query);
+    const { items, total } = await this.productsRepository.findForModeration({
+      status: query.status,
+      sellerId: query.sellerId,
+      search: query.search,
+      skip,
+      take,
+    });
+    return { items, total, page, limit };
   }
 
   // Takedown reuses ARCHIVED rather than adding a parallel "removed by
@@ -543,6 +558,23 @@ export class ProductsService {
       return;
     }
     await this.recordInventoryUpdated(tx, inventory, 'CANCELLATION');
+  }
+
+  // The units already left quantityReserved at SHIPMENT, so there is no
+  // hold left to release — an admin force-cancelling a SHIPPED or
+  // COMPLETED order needs a genuine restock instead. See
+  // OrdersService.updateSellerOrderStatus / canAdminForceCancel.
+  async returnStockAfterForceCancellation(
+    tx: Prisma.TransactionClient,
+    productId: string,
+    quantity: number,
+  ): Promise<void> {
+    const inventory = await this.productsRepository.returnStock(
+      tx,
+      productId,
+      quantity,
+    );
+    await this.recordInventoryUpdated(tx, inventory, 'RETURN');
   }
 
   // ===================== Auction lot holds =====================

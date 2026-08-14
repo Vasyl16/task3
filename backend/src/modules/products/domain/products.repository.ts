@@ -32,7 +32,10 @@ export abstract class ProductsRepository {
   abstract findForModeration(filter: {
     status?: ProductStatus;
     sellerId?: string;
-  }): Promise<Product[]>;
+    search?: string;
+    skip?: number;
+    take?: number;
+  }): Promise<{ items: Product[]; total: number }>;
   // Takes the caller's transaction client — Product + Inventory must be
   // created atomically, in the same transaction as the outbox event.
   abstract createWithInventory(
@@ -116,6 +119,15 @@ export abstract class ProductsRepository {
     productId: string,
     quantity: number,
   ): Promise<Inventory | null>;
+  // A pure restock — quantityAvailable rises, quantityReserved untouched
+  // — for the one case where a hold has already been consumed and the
+  // units still need to come back on sale. See
+  // ProductsService.returnStockAfterForceCancellation.
+  abstract returnStock(
+    tx: Prisma.TransactionClient,
+    productId: string,
+    quantity: number,
+  ): Promise<Inventory>;
 
   abstract setStock(
     tx: Prisma.TransactionClient,
