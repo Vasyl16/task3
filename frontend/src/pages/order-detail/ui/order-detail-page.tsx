@@ -1,10 +1,12 @@
 import { useParams } from 'react-router-dom';
 import {
   OrderStatusBadge,
+  OrderItemLines,
   SellerOrderStatusBadge,
   useOrder,
   useOrderRealtime,
 } from '../../../entities/order';
+import { RaiseDisputeButton } from '../../../features/raise-dispute';
 import { formatDateTime, formatMoney } from '../../../shared/lib';
 import { Card, ErrorState, PageHeader, PageSpinner } from '../../../shared/ui';
 
@@ -52,6 +54,39 @@ export function OrderDetailPage() {
                 Subtotal {formatMoney(sellerOrder.subtotal)} + shipping{' '}
                 {formatMoney(sellerOrder.shippingFee)}
               </p>
+              {/* Per line, because a buyer who ordered four things from
+                  one seller should be able to dispute one of them
+                  without dragging the other three in. */}
+              <ul
+                style={{
+                  listStyle: 'none',
+                  padding: 0,
+                  margin: 'var(--space-2) 0 0',
+                  display: 'grid',
+                  gap: 'var(--space-3)',
+                }}
+              >
+                {(sellerOrder.items ?? []).map((item) => (
+                  <li key={item.id}>
+                    <OrderItemLines items={[item]} />
+                    <RaiseDisputeButton
+                      sellerOrderId={sellerOrder.id}
+                      orderItemId={item.id}
+                      itemName={item.product.name}
+                      sellerOrderStatus={sellerOrder.status}
+                    />
+                  </li>
+                ))}
+              </ul>
+
+              {/* And one for the shipment as a whole — "nothing arrived"
+                  is not a complaint about any single line. */}
+              <div style={{ marginTop: 'var(--space-3)' }}>
+                <RaiseDisputeButton
+                  sellerOrderId={sellerOrder.id}
+                  sellerOrderStatus={sellerOrder.status}
+                />
+              </div>
             </Card>
           ))}
         </div>

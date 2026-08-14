@@ -1,3 +1,4 @@
+import type { OrderStatus } from './order';
 import { useQuery } from '@tanstack/react-query';
 import { orderApi, orderKeys } from '../api/order-api';
 
@@ -20,5 +21,13 @@ export function useMySellerOrders() {
   return useQuery({
     queryKey: orderKeys.mySellerOrders(),
     queryFn: orderApi.mySellerOrders,
+  });
+}
+
+// ADMIN only — every order, for the moderation queue.
+export function useAdminOrders(params?: { status?: OrderStatus }) {
+  return useQuery({
+    queryKey: orderKeys.adminList(params),
+    queryFn: () => orderApi.adminList(params),
   });
 }

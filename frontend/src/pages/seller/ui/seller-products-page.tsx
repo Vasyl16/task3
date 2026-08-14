@@ -1,8 +1,8 @@
 import type { CSSProperties } from 'react';
-import { Link, useOutletContext } from 'react-router-dom';
-import { ProductStatusBadge, useProducts } from '../../../entities/product';
+import { Link } from 'react-router-dom';
+import { ProductStatusBadge, useMyProducts } from '../../../entities/product';
+import { RestoreProductButton } from '../../../features/seller-products';
 import type { Product } from '../../../entities/product';
-import type { SellerProfile } from '../../../entities/seller';
 import { paths } from '../../../app/routes/paths';
 import { formatMoney, resolveAssetUrl } from '../../../shared/lib';
 import {
@@ -15,17 +15,17 @@ import {
 } from '../../../shared/ui';
 
 export function SellerProductsPage() {
-  // Resolved once by SellerLayout and only rendered once it's a
-  // confirmed APPROVED profile — see the comment there. Reading it from
-  // route context instead of calling useMySellerProfile() again here is
-  // what keeps this query from ever firing with a missing sellerId.
-  const profile = useOutletContext<SellerProfile>();
+  // No sellerId needed any more: /products/mine resolves the seller from
+  // the authenticated caller's own approved profile, so there is nothing
+  // for a client to get wrong or point at someone else.
   const {
     data: products,
     error,
     isPending,
     refetch,
-  } = useProducts({ sellerId: profile.id });
+    // Own catalogue, ARCHIVED included — otherwise a seller can never
+    // find a listing they took down, let alone put it back.
+  } = useMyProducts();
 
   return (
     <div>
@@ -55,6 +55,7 @@ export function SellerProductsPage() {
               <th scope="col">Type</th>
               <th scope="col">Price</th>
               <th scope="col">Status</th>
+              <th scope="col">Action</th>
             </tr>
           </thead>
           <tbody>
@@ -74,6 +75,14 @@ export function SellerProductsPage() {
                 <td>{formatMoney(product.basePrice)}</td>
                 <td>
                   <ProductStatusBadge status={product.status} />
+                </td>
+                <td>
+                  {product.status === 'ARCHIVED' && (
+                    <RestoreProductButton
+                      productId={product.id}
+                      moderatedAt={product.moderatedAt}
+                    />
+                  )}
                 </td>
               </tr>
             ))}

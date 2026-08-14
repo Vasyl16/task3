@@ -26,7 +26,13 @@ export function useCartCheckout() {
       // the next cart fetch confirms it.
       void queryClient.invalidateQueries({ queryKey: cartKeys.detail() });
       void queryClient.invalidateQueries({ queryKey: orderKeys.lists() });
-      queryClient.setQueryData(orderKeys.detail(order.id), order);
+      // Invalidated, NOT seeded with the response: the checkout payload
+      // has no line items, so writing it into the detail cache would
+      // hand the order page an order whose sellerOrders have no items
+      // and crash it. Let the detail query fetch the full shape.
+      void queryClient.invalidateQueries({
+        queryKey: orderKeys.detail(order.id),
+      });
     },
   });
 
@@ -41,7 +47,10 @@ export function useAuctionCheckout(auctionId: string) {
     mutationFn: () => orderApi.checkoutAuction(auctionId, idempotencyKey),
     onSuccess: (order) => {
       void queryClient.invalidateQueries({ queryKey: orderKeys.lists() });
-      queryClient.setQueryData(orderKeys.detail(order.id), order);
+      // Same reason as the cart checkout above.
+      void queryClient.invalidateQueries({
+        queryKey: orderKeys.detail(order.id),
+      });
     },
   });
 

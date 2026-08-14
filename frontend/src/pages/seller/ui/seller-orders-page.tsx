@@ -1,4 +1,5 @@
 import {
+  OrderItemLines,
   SellerOrderStatusBadge,
   useMySellerOrders,
 } from '../../../entities/order';
@@ -32,6 +33,7 @@ export function SellerOrdersPage() {
           <thead>
             <tr>
               <th scope="col">Order</th>
+              <th scope="col">Items</th>
               <th scope="col">Placed</th>
               <th scope="col">Subtotal</th>
               <th scope="col">Status</th>
@@ -42,6 +44,9 @@ export function SellerOrdersPage() {
             {sellerOrders.map((sellerOrder) => (
               <tr key={sellerOrder.id}>
                 <td>{sellerOrder.order.id.slice(0, 8)}</td>
+                <td>
+                  <OrderItemLines items={sellerOrder.items} />
+                </td>
                 <td>{formatDateTime(sellerOrder.order.placedAt)}</td>
                 <td>{formatMoney(sellerOrder.subtotal)}</td>
                 <td>
