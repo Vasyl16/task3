@@ -60,10 +60,11 @@ model User {
   notifications Notification[]
   reviews       Review[]
 
-  refundsRequested Refund[]  @relation("RefundRequester")
-  refundsResolved  Refund[]  @relation("RefundResolver")
-  disputesRaised   Dispute[] @relation("DisputeRaiser")
-  disputesResolved Dispute[] @relation("DisputeResolver")
+  refundsRequested Refund[]         @relation("RefundRequester")
+  refundsResolved  Refund[]         @relation("RefundResolver")
+  disputesRaised   Dispute[]        @relation("DisputeRaiser")
+  disputesResolved Dispute[]        @relation("DisputeResolver")
+  disputeComments  DisputeComment[] @relation("DisputeCommenter")
 
   @@index([role])
 }
@@ -183,6 +184,7 @@ model Product {
   auctions   Auction[]
   cartItems  CartItem[]
   orderItems OrderItem[]
+  reviews    Review[]
 
   @@index([sellerId])
   @@index([categoryId, status])
@@ -410,7 +412,6 @@ model SellerOrder {
   items         OrderItem[]
   ledgerEntries LedgerEntry[]
   refunds       Refund[]
-  review        Review?
   disputes      Dispute[]
 
   @@index([orderId])
@@ -429,6 +430,9 @@ model OrderItem {
   // Snapshot at time of purchase — never re-read live Product.basePrice.
   unitPrice     Decimal     @db.Decimal(12, 2)
   createdAt     DateTime    @default(now())
+
+  review   Review?
+  disputes Dispute[]
 
   @@index([sellerOrderId])
   @@index([productId])
@@ -481,15 +485,15 @@ enum RefundStatus {
 }
 
 model Refund {
-  id            String      @id @default(uuid())
+  id            String       @id @default(uuid())
   sellerOrderId String
-  sellerOrder   SellerOrder @relation(fields: [sellerOrderId], references: [id], onDelete: Restrict)
+  sellerOrder   SellerOrder  @relation(fields: [sellerOrderId], references: [id], onDelete: Restrict)
   // NULL when the system opened this refund itself, which is what a
   // cancellation does — nobody "requested" it, the saga did. A non-null
   // value means a real person asked for it through the manual flow.
   requestedById String?
-  requestedBy   User?       @relation("RefundRequester", fields: [requestedById], references: [id], onDelete: Restrict)
-  amount        Decimal     @db.Decimal(12, 2)
+  requestedBy   User?        @relation("RefundRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+  amount        Decimal      @db.Decimal(12, 2)
   reason        String?
   status        RefundStatus @default(REQUESTED)
 
@@ -622,20 +626,38 @@ model Notification {
 
 // ===================== Trust & Safety =====================
 
-// Unique per SellerOrder — only a verified (completed) purchase can be
-// reviewed, and only once.
+// Anchored to the purchased LINE ITEM, not the SellerOrder. That is what
+// makes "verified purchase" mean what it says: an OrderItem is the proof
+// that this buyer bought THIS product in this order, so a review cannot
+// exist without one. Keying on the SellerOrder instead would only prove
+// the buyer ordered something from the seller, which is not enough to
+// rate a product.
+//
+// @unique on orderItemId gives "one review per purchased line" for free —
+// buy the same product twice and you may review it twice, once per
+// purchase, which is the honest reading of a verified review.
+//
+// productId and sellerId are denormalised from the line item so ratings
+// can be aggregated and filtered without joining through OrderItem ->
+// SellerOrder on every catalogue query. They are copies of immutable
+// facts (which product was bought, from which seller), so they cannot
+// drift the way a cached average would.
 model Review {
-  id            String        @id @default(uuid())
-  sellerOrderId String        @unique
-  sellerOrder   SellerOrder   @relation(fields: [sellerOrderId], references: [id], onDelete: Restrict)
-  authorId      String
-  author        User          @relation(fields: [authorId], references: [id], onDelete: Restrict)
-  sellerId      String
-  seller        SellerProfile @relation(fields: [sellerId], references: [id], onDelete: Restrict)
-  rating        Int
-  comment       String?
-  createdAt     DateTime      @default(now())
+  id          String        @id @default(uuid())
+  orderItemId String        @unique
+  orderItem   OrderItem     @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+  productId   String
+  product     Product       @relation(fields: [productId], references: [id], onDelete: Restrict)
+  authorId    String
+  author      User          @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  sellerId    String
+  seller      SellerProfile @relation(fields: [sellerId], references: [id], onDelete: Restrict)
+  rating      Int
+  comment     String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
 
+  @@index([productId])
   @@index([sellerId])
   @@index([authorId])
 }
@@ -651,6 +673,16 @@ model Dispute {
   id            String        @id @default(uuid())
   sellerOrderId String
   sellerOrder   SellerOrder   @relation(fields: [sellerOrderId], references: [id], onDelete: Restrict)
+  // Which LINE the complaint is about. Optional on purpose: a parcel
+  // that never arrived is a problem with the whole shipment, while a
+  // single damaged item is a problem with one line — and a buyer who
+  // ordered four things from one seller should be able to dispute one
+  // of them without dragging the other three into it.
+  //
+  // Always belongs to sellerOrder above; DisputesService rejects a line
+  // from a different order, so this can never point across orders.
+  orderItemId   String?
+  orderItem     OrderItem?    @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
   raisedById    String
   raisedBy      User          @relation("DisputeRaiser", fields: [raisedById], references: [id], onDelete: Restrict)
   reason        String
@@ -663,6 +695,28 @@ model Dispute {
 
   createdAt DateTime @default(now())
 
+  comments DisputeComment[]
+
   @@index([sellerOrderId])
+  @@index([orderItemId])
   @@index([status])
+}
+
+// The back-and-forth between the buyer who raised a dispute and the
+// admin handling it. Separate from Dispute.reason (the opening
+// statement, immutable) and Dispute.resolution (the final ruling): a
+// thread is append-only evidence, and collapsing it into either field
+// would mean losing who said what and when.
+//
+// Cascades with its dispute — a comment has no meaning without one.
+model DisputeComment {
+  id        String   @id @default(uuid())
+  disputeId String
+  dispute   Dispute  @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation("DisputeCommenter", fields: [authorId], references: [id], onDelete: Restrict)
+  body      String
+  createdAt DateTime @default(now())
+
+  @@index([disputeId, createdAt])
 }

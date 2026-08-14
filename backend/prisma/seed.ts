@@ -16,9 +16,11 @@ import * as bcrypt from 'bcrypt';
 import { PrismaPg } from '@prisma/adapter-pg';
 import {
   AuctionStatus,
+  DisputeStatus,
   PrismaClient,
   ProductStatus,
   ProductType,
+  SellerOrderStatus,
   SellerProfileStatus,
   UserRole,
   type Category,
@@ -72,7 +74,10 @@ interface ProductSearchDocument {
   categoryName: string;
   sellerId: string;
   sellerName: string;
-  sellerRating: number | null;
+  // The PRODUCT's own rating, matching the real indexer (see
+  // SearchSyncConsumer) — not the seller's average across their
+  // catalogue, which would let a strong listing carry a weak one.
+  productRating: number | null;
   type: string;
   inStock: boolean;
   quantityAvailable: number;
@@ -106,11 +111,11 @@ async function getMeilisearchIndex() {
         'categoryId',
         'sellerId',
         'basePrice',
-        'sellerRating',
+        'productRating',
         'inStock',
         'type',
       ],
-      sortableAttributes: ['basePrice', 'createdAt', 'sellerRating'],
+      sortableAttributes: ['basePrice', 'createdAt', 'productRating'],
     });
   } catch (err) {
     console.warn(
@@ -136,7 +141,7 @@ async function syncProductToSearch(productId: string): Promise<void> {
     prisma.sellerProfile.findUniqueOrThrow({ where: { id: product.sellerId } }),
     prisma.inventory.findUnique({ where: { productId } }),
     prisma.review.aggregate({
-      where: { sellerId: product.sellerId },
+      where: { productId },
       _avg: { rating: true },
     }),
   ]);
@@ -150,11 +155,11 @@ async function syncProductToSearch(productId: string): Promise<void> {
     categoryName: category.name,
     sellerId: product.sellerId,
     sellerName: seller.businessName,
-    sellerRating: ratingAgg._avg.rating,
+    productRating: ratingAgg._avg.rating,
     type: product.type,
-    inStock:
-      (inventory?.quantityAvailable ?? 0) - (inventory?.quantityReserved ?? 0) >
-      0,
+    // See SearchSyncConsumer: reserved units are already out of
+    // quantityAvailable, so no subtraction here either.
+    inStock: (inventory?.quantityAvailable ?? 0) > 0,
     quantityAvailable: inventory?.quantityAvailable ?? 0,
     createdAt: product.createdAt.getTime(),
   };
@@ -759,6 +764,169 @@ async function upsertPendingApplicant(): Promise<void> {
   });
 }
 
+// ===================== Reviews =====================
+//
+// A review cannot be conjured directly: ReviewsService will only accept
+// one for an OrderItem on a COMPLETED SellerOrder belonging to the
+// author. So the seed builds the real chain — customer, order, seller
+// order, line item — rather than inserting Review rows that the
+// application itself would never have allowed. The upside is that the
+// seeded data also gives every reviewer a believable order history.
+const REVIEWERS = [
+  { email: 'maya@seed.marketplace.test', name: 'Maya Okonkwo' },
+  { email: 'devin@seed.marketplace.test', name: 'Devin Alvarez' },
+  { email: 'priya@seed.marketplace.test', name: 'Priya Raman' },
+  { email: 'tomas@seed.marketplace.test', name: 'Tomás Lindqvist' },
+  { email: 'sara@seed.marketplace.test', name: 'Sara Bennett' },
+];
+
+// Deliberately not all five stars. A catalogue where everything is
+// perfect makes sort-by-rating meaningless and hides the difference
+// between "great" and "nobody has said anything yet".
+const REVIEW_TEMPLATES: { rating: number; comment: string | null }[] = [
+  { rating: 5, comment: 'Exactly as described, and it arrived early.' },
+  { rating: 4, comment: 'Very good overall — packaging could be better.' },
+  { rating: 5, comment: 'Second one I have bought. No complaints at all.' },
+  { rating: 3, comment: 'Does the job, but not much more than that.' },
+  { rating: 4, comment: null },
+  { rating: 2, comment: 'Worked for a week, then started playing up.' },
+];
+
+async function upsertReviewer(seed: {
+  email: string;
+  name: string;
+}): Promise<User> {
+  const existing = await prisma.user.findUnique({
+    where: { email: seed.email },
+  });
+  if (existing) return existing;
+  return prisma.user.create({
+    data: {
+      email: seed.email,
+      name: seed.name,
+      passwordHash: await bcrypt.hash(SEED_PASSWORD, BCRYPT_ROUNDS),
+      role: UserRole.CUSTOMER,
+    },
+  });
+}
+
+// Spreads ratings deterministically so re-running the seed produces the
+// same catalogue, and so different products end up genuinely differently
+// rated rather than all averaging the same.
+async function seedReviewsForProduct(
+  product: Product,
+  sellerProfileId: string,
+  reviewers: User[],
+  offset: number,
+): Promise<number> {
+  const reviewCount = offset % 4 === 0 ? 0 : (offset % 3) + 1;
+  let created = 0;
+
+  for (let i = 0; i < reviewCount; i++) {
+    const reviewer = reviewers[(offset + i) % reviewers.length];
+    const template = REVIEW_TEMPLATES[(offset + i) % REVIEW_TEMPLATES.length];
+
+    // Idempotency key for this seed: one seeded review per
+    // (author, product). Re-running finds it and skips the whole chain,
+    // so no duplicate orders pile up either.
+    const existing = await prisma.review.findFirst({
+      where: { authorId: reviewer.id, productId: product.id },
+    });
+    if (existing) continue;
+
+    const unitPrice = product.basePrice;
+    const order = await prisma.order.create({
+      data: {
+        buyerId: reviewer.id,
+        status: 'COMPLETED',
+        totalAmount: unitPrice,
+        sellerOrders: {
+          create: {
+            sellerId: sellerProfileId,
+            // COMPLETED is what makes the purchase reviewable at all.
+            status: SellerOrderStatus.COMPLETED,
+            subtotal: unitPrice,
+            items: {
+              create: { productId: product.id, quantity: 1, unitPrice },
+            },
+          },
+        },
+      },
+      include: { sellerOrders: { include: { items: true } } },
+    });
+
+    await prisma.review.create({
+      data: {
+        orderItemId: order.sellerOrders[0].items[0].id,
+        productId: product.id,
+        sellerId: sellerProfileId,
+        authorId: reviewer.id,
+        rating: template.rating,
+        comment: template.comment,
+      },
+    });
+    created += 1;
+  }
+
+  return created;
+}
+
+// One worked example of the dispute flow, so the admin queue and the
+// comment thread are not empty on a fresh database.
+async function seedDispute(
+  reviewer: User,
+  sellerProfileId: string,
+  product: Product,
+): Promise<boolean> {
+  const existing = await prisma.dispute.findFirst({
+    where: { raisedById: reviewer.id },
+  });
+  if (existing) return false;
+
+  const order = await prisma.order.create({
+    data: {
+      buyerId: reviewer.id,
+      status: 'COMPLETED',
+      totalAmount: product.basePrice,
+      sellerOrders: {
+        create: {
+          sellerId: sellerProfileId,
+          status: SellerOrderStatus.COMPLETED,
+          subtotal: product.basePrice,
+          items: {
+            create: {
+              productId: product.id,
+              quantity: 1,
+              unitPrice: product.basePrice,
+            },
+          },
+        },
+      },
+    },
+    include: { sellerOrders: true },
+  });
+
+  await prisma.dispute.create({
+    data: {
+      sellerOrderId: order.sellerOrders[0].id,
+      raisedById: reviewer.id,
+      reason:
+        'Marked as delivered but the parcel never arrived — the tracking ' +
+        'has not updated in nine days.',
+      status: DisputeStatus.UNDER_REVIEW,
+      comments: {
+        create: [
+          {
+            authorId: reviewer.id,
+            body: 'I have checked with my neighbours and the depot, nothing.',
+          },
+        ],
+      },
+    },
+  });
+  return true;
+}
+
 async function main() {
   console.log('Seeding admin account...');
   await upsertAdmin();
@@ -773,6 +941,9 @@ async function main() {
   }
 
   const productIdsToSync: string[] = [];
+  // Kept alongside their seller so reviews can be attached after the
+  // whole catalogue exists.
+  const seededProducts: { product: Product; sellerProfileId: string }[] = [];
 
   for (const sellerSeed of SELLERS) {
     console.log(`Seeding ${sellerSeed.businessName}...`);
@@ -788,6 +959,7 @@ async function main() {
         category.id,
       );
       productIdsToSync.push(product.id);
+      seededProducts.push({ product, sellerProfileId: sellerProfile.id });
     }
 
     const auctionCategory = categoriesBySlug.get(
@@ -804,7 +976,45 @@ async function main() {
       auctionCategory.id,
     );
     productIdsToSync.push(auctionProduct.id);
+    seededProducts.push({
+      product: auctionProduct,
+      sellerProfileId: sellerProfile.id,
+    });
   }
+
+  // Reviews BEFORE the Meilisearch sync: the search document carries
+  // productRating, so indexing first would publish every product as
+  // unrated and leave sort-by-rating flat until something else happened
+  // to touch each row.
+  console.log('\nSeeding customers, their order history, and reviews...');
+  const reviewers: User[] = [];
+  for (const seed of REVIEWERS) {
+    reviewers.push(await upsertReviewer(seed));
+  }
+
+  let reviewsCreated = 0;
+  for (const [index, entry] of seededProducts.entries()) {
+    reviewsCreated += await seedReviewsForProduct(
+      entry.product,
+      entry.sellerProfileId,
+      reviewers,
+      index,
+    );
+  }
+  console.log(
+    `Seeded ${reviewsCreated} review(s) across ${seededProducts.length} products.`,
+  );
+
+  const disputeSeeded = await seedDispute(
+    reviewers[0],
+    seededProducts[0].sellerProfileId,
+    seededProducts[0].product,
+  );
+  console.log(
+    disputeSeeded
+      ? 'Seeded 1 dispute (UNDER_REVIEW) with an open comment thread.'
+      : 'Dispute already present — left alone.',
+  );
 
   console.log(
     `\nSyncing ${productIdsToSync.length} products to Meilisearch...`,
@@ -838,6 +1048,9 @@ async function main() {
   console.log(
     `  ${PENDING_APPLICANT.email}  (customer, PENDING seller application — review it as admin)`,
   );
+  for (const seed of REVIEWERS) {
+    console.log(`  ${seed.email}  (customer with order history + reviews)`);
+  }
   console.log(
     "\nAny seller can bid on another seller's auction to test bidding " +
       'end-to-end — placing a bid has no role restriction beyond being ' +
