@@ -5,3 +5,4 @@ export { SellerProductNewPage } from './ui/seller-product-new-page';
 export { SellerProductEditPage } from './ui/seller-product-edit-page';
 export { SellerAuctionsPage } from './ui/seller-auctions-page';
 export { SellerOrdersPage } from './ui/seller-orders-page';
+export { SellerDisputesPage } from './ui/seller-disputes-page';

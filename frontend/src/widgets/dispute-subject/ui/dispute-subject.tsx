@@ -21,10 +21,20 @@ export function DisputeSubject({ dispute }: DisputeSubjectProps) {
 
   return (
     <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
+      {/* Both ids, because they answer different questions: the order is
+          what the buyer placed and what support will be asked about, the
+          shipment is the one seller's part of it that this dispute
+          actually concerns. Showing only the shipment left no way to tie
+          the case back to the order it belongs to. */}
       <div style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
-        {dispute.orderItemId ? 'Disputed item' : 'Whole shipment disputed'} ·
-        shipment {sellerOrder.id.slice(0, 8)} ·{' '}
-        <Link to={paths.order(sellerOrder.orderId)}>view order</Link>
+        {dispute.orderItemId ? 'Disputed item' : 'Whole shipment disputed'}
+        {' · '}
+        Order{' '}
+        <Link to={paths.order(sellerOrder.orderId)}>
+          {sellerOrder.orderId.slice(0, 8)}
+        </Link>
+        {' · '}
+        Shipment {sellerOrder.id.slice(0, 8)}
       </div>
 
       <ul

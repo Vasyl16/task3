@@ -25,6 +25,8 @@ export const paths = {
     product: (id: string) => `/seller/products/${id}`,
     auctions: '/seller/auctions',
     orders: '/seller/orders',
+    disputes: '/seller/disputes',
+    dispute: (id: string) => `/seller/disputes/${id}`,
   },
 
   admin: {

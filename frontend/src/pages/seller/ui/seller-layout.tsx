@@ -35,6 +35,7 @@ export function SellerLayout() {
           { to: paths.seller.products, label: 'Products' },
           { to: paths.seller.auctions, label: 'Auctions' },
           { to: paths.seller.orders, label: 'Orders' },
+          { to: paths.seller.disputes, label: 'Disputes' },
         ]}
       />
 

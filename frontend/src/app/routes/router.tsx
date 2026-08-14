@@ -25,6 +25,7 @@ import { RegisterPage } from '../../pages/register';
 import {
   SellerAuctionsPage,
   SellerLayout,
+  SellerDisputesPage,
   SellerOrdersPage,
   SellerOverviewPage,
   SellerProductEditPage,
@@ -97,6 +98,21 @@ export const router = createBrowserRouter([
               },
               { path: paths.seller.auctions, element: <SellerAuctionsPage /> },
               { path: paths.seller.orders, element: <SellerOrdersPage /> },
+              {
+                path: paths.seller.disputes,
+                element: <SellerDisputesPage />,
+              },
+              {
+                // Reuses the customer-facing DisputeDetailPage: the
+                // backend now admits the owning seller on GET
+                // /disputes/:id (and its comments), and the page's
+                // subject/reason/resolution/thread layout is exactly
+                // what a seller needs too — a resolve control never
+                // appears here, since only AdminDisputesPage renders
+                // one.
+                path: '/seller/disputes/:id',
+                element: <DisputeDetailPage />,
+              },
             ],
           },
         ],
