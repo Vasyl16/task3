@@ -14,6 +14,13 @@ WORKDIR /app
 # Prisma probes the libssl version when it loads; slim images ship
 # neither, which makes it warn and guess. Needed here (not just at
 # runtime) because the `migrate` stage below runs the CLI from this one.
+#
+# DL3008 (pin apt versions) is waived deliberately: openssl is exactly
+# the package that must be allowed to pick up Debian's security updates.
+# Pinning it to an exact patch version would break the build the moment
+# that version is superseded — which for a TLS library is backwards. The
+# base image tag is pinned, which is where reproducibility belongs.
+# hadolint ignore=DL3008
 RUN apt-get update \
   && apt-get install -y --no-install-recommends openssl \
   && rm -rf /var/lib/apt/lists/*
@@ -52,6 +59,8 @@ FROM node:24-bookworm-slim AS runtime
 WORKDIR /app
 
 # Prisma's query engine links against OpenSSL, which slim images omit.
+# Same deliberate DL3008 waiver as the build stage above.
+# hadolint ignore=DL3008
 RUN apt-get update \
   && apt-get install -y --no-install-recommends openssl \
   && rm -rf /var/lib/apt/lists/*

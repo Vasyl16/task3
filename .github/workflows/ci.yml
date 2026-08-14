@@ -1,0 +1,247 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch makes an in-flight run obsolete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '24'
+
+jobs:
+  # ---------------------------------------------------------------
+  # Backend: everything that needs no infrastructure. Unit tests here
+  # use mocked Prisma, so they must stay runnable with no database at
+  # all — if this job ever starts needing a service, a unit test has
+  # quietly become an integration test.
+  # ---------------------------------------------------------------
+  backend:
+    name: Backend (lint, typecheck, unit tests, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      # `npm ci` triggers the postinstall `prisma generate`, which reads
+      # prisma.config.ts — and that resolves env('DATABASE_URL') as it
+      # loads, even though generation never connects to anything.
+      - name: Install dependencies
+        run: npm ci
+        env:
+          DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
+
+      # --max-warnings=0: a warning that nobody has to fix is a warning
+      # that accumulates. --no-fix because CI must report the state of
+      # the committed code, not quietly repair it and pass.
+      - name: Lint
+        run: npx eslint "{src,test}/**/*.ts" prisma.config.ts --max-warnings=0
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  # ---------------------------------------------------------------
+  # Backend e2e: real database, real Redis, real Meilisearch.
+  #
+  # The database is an EPHEMERAL container that exists only for this
+  # job. Development uses a remote PostgreSQL, but CI must never touch
+  # it: these tests write and delete real rows, and a personal or shared
+  # database is not something an automated run on a pull request should
+  # be allowed near. No DATABASE_URL secret is referenced anywhere in
+  # this file, so there is nothing to leak and nothing to point at the
+  # wrong instance by accident.
+  # ---------------------------------------------------------------
+  backend-e2e:
+    name: Backend e2e (ephemeral Postgres + Redis + Meilisearch)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: marketplace_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci -d marketplace_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+      meilisearch:
+        image: getmeili/meilisearch:v1.11
+        env:
+          MEILI_MASTER_KEY: ci_master_key_not_a_secret
+          MEILI_ENV: development
+        ports:
+          - 7700:7700
+
+    env:
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/marketplace_test?schema=public
+      REDIS_URL: redis://localhost:6379
+      MEILISEARCH_HOST: http://localhost:7700
+      MEILI_MASTER_KEY: ci_master_key_not_a_secret
+      # Throwaway values for a throwaway database. Real secrets are never
+      # needed by this job and are deliberately not wired in.
+      JWT_ACCESS_SECRET: ci_access_secret_min_16_chars
+      JWT_REFRESH_SECRET: ci_refresh_secret_min_16_chars
+      # RESEND_API_KEY is intentionally unset: EmailService logs and skips
+      # rather than sending, so CI never emails a real address.
+      LOG_FILE: ''
+      NODE_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `db push`, not `migrate deploy`, and the reason matters: the
+      # squashed init migration is missing its CREATE TYPE statements, so
+      # replaying migration history against an empty database fails. The
+      # live database is fine (the types exist there), but CI starts from
+      # nothing. `db push` builds the schema directly from schema.prisma,
+      # which is what these tests actually need to run against.
+      #
+      # Consequence, stated plainly: this pipeline does NOT prove the
+      # migrations can rebuild the schema from scratch. Restoring that
+      # coverage means repairing the init migration first — see the
+      # "Database (Prisma)" section of README.md.
+      - name: Create schema on the ephemeral database
+        run: npx prisma db push
+
+      # No `options: --health-cmd` on the meilisearch service: that image
+      # ships neither curl nor wget, so a container-level healthcheck has
+      # nothing to run. Polled from the runner instead.
+      - name: Wait for Meilisearch
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:7700/health > /dev/null; then
+              echo "meilisearch ready"; exit 0
+            fi
+            sleep 2
+          done
+          echo "meilisearch did not become ready in time"; exit 1
+
+      - name: E2E tests
+        run: npm run test:e2e
+
+  # ---------------------------------------------------------------
+  # Frontend: no infrastructure needed — the API is mocked in tests and
+  # the build inlines only public VITE_* values.
+  # ---------------------------------------------------------------
+  frontend:
+    name: Frontend (lint, typecheck, tests, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npx eslint . --max-warnings=0
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  # ---------------------------------------------------------------
+  # Config linting. Cheap, and catches the class of mistake that is
+  # invisible until a deploy: an unpinned base image, a compose file
+  # that no longer parses, a workflow with a typo'd expression.
+  # ---------------------------------------------------------------
+  config-lint:
+    name: Lint Docker and CI config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint backend Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: backend/Dockerfile
+          failure-threshold: warning
+
+      - name: Lint frontend Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: frontend/Dockerfile
+          failure-threshold: warning
+
+      # Fully resolves the compose file — interpolation, profiles, the
+      # lot. Catches a malformed service long before someone runs `up`.
+      - name: Validate docker-compose (both profiles)
+        run: |
+          docker compose config --quiet
+          docker compose --profile full config --quiet
+
+      # actionlint checks the workflow files themselves: bad expressions,
+      # unknown keys, shell bugs in `run:` blocks.
+      #
+      # A pinned container rather than the project's `curl | bash`
+      # installer: piping a remote script straight into a shell means CI
+      # executes whatever that URL returns at the moment it runs, with no
+      # review and no pinning. A tagged image is the same tool with a
+      # supply chain you can actually point at.
+      - name: Lint GitHub Actions workflows
+        run: |
+          docker run --rm -v "$PWD:/repo" --workdir /repo \
+            rhysd/actionlint:1.7.7 -color
