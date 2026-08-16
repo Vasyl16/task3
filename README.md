@@ -340,6 +340,27 @@ Run these from inside `backend/` or `frontend/` respectively:
 | `npm run typecheck`| TypeScript type-checking only         |
 | `npm run test`     | Unit tests (Jest for backend, Vitest for frontend) |
 | `npm run test:e2e` | Backend end-to-end tests (NestJS + supertest) |
+| `npm run storybook` (frontend) | Storybook dev server, on `:6006` |
+| `npm run build-storybook` (frontend) | Static Storybook build, to `frontend/storybook-static/` |
+
+### Storybook
+
+Every component in `frontend/src/shared/ui/` — the app's design system
+(`Button`, `TextField`, `Card`, `Badge`, `Pagination`, `Toast`, …) — has a
+co-located `*.stories.tsx` file. **Scope is deliberately limited to
+`shared/ui`.** The `ui/` folders under `entities/`, `features/`,
+`pages/`, and `widgets/` hold connected components wired to TanStack
+Query, routing, and auth — rendering those in isolation would mean
+building and maintaining a parallel mocking layer for all of that, for
+components that mostly aren't reused outside the one screen they compose.
+`shared/ui` is the actual reusable kit: pure, prop-driven, and safe to
+render standalone.
+
+`.storybook/preview.tsx` wraps every story in a `MemoryRouter` (the one
+`shared/ui` component that needs router context, `Tabs`, otherwise
+wouldn't render) and imports the app's real `index.css`, so stories use
+the same design tokens and component styles as the running app rather
+than an unstyled approximation.
 
 ## Continuous integration
 
