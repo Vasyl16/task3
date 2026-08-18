@@ -6,7 +6,12 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SellerOrderStatus, type Review } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
 import type { AuthenticatedUser } from '../../core/auth/authenticated-user.interface';
+import { CorrelationIdService } from '../../core/correlation-id/correlation-id.service';
+import { OutboxService } from '../../infrastructure/outbox/outbox.service';
+import { PrismaService } from '../../infrastructure/prisma/prisma.service';
+import { PRODUCT_UPDATED_EVENT } from '../products/domain/events/product-updated.event';
 import {
   ProductRatingSummary,
   ReviewablePurchase,
@@ -18,7 +23,16 @@ import { CreateReviewDto } from './dto/create-review.dto';
 export class ReviewsService {
   private readonly logger = new Logger(ReviewsService.name);
 
-  constructor(private readonly reviewsRepository: ReviewsRepository) {}
+  constructor(
+    private readonly reviewsRepository: ReviewsRepository,
+    private readonly outboxService: OutboxService,
+    private readonly correlationIdService: CorrelationIdService,
+    // Used only to open the transaction boundary below — every actual
+    // read/write still goes through ReviewsRepository, keeping Prisma
+    // details out of the rest of the service (same reasoning as
+    // ProductsService).
+    private readonly prisma: PrismaService,
+  ) {}
 
   // The whole point of the feature: a rating only counts if the person
   // giving it actually bought the thing. Four conditions, in this order:
@@ -62,13 +76,31 @@ export class ReviewsService {
       throw new ConflictException('You have already reviewed this purchase');
     }
 
-    const review = await this.reviewsRepository.create({
-      orderItemId: dto.orderItemId,
-      productId: purchase.productId,
-      sellerId: purchase.sellerId,
-      authorId: caller.id,
-      rating: dto.rating,
-      comment: dto.comment,
+    const correlationId = this.correlationIdService.getId() ?? randomUUID();
+
+    // Review row + search-resync outbox event, same transaction: a
+    // review that lands must always (eventually) be reflected in the
+    // product's Meilisearch document — see PRODUCT_UPDATED_EVENT reuse
+    // in BiddingService for the identical pattern (hasActiveAuction).
+    // Catalogue/product-detail pages don't need this at all — they read
+    // ReviewsService live — this is purely for search results/sort.
+    const review = await this.prisma.$transaction(async (tx) => {
+      const created = await this.reviewsRepository.create(tx, {
+        orderItemId: dto.orderItemId,
+        productId: purchase.productId,
+        sellerId: purchase.sellerId,
+        authorId: caller.id,
+        rating: dto.rating,
+        comment: dto.comment,
+      });
+      await this.outboxService.record(tx, {
+        aggregateType: 'Product',
+        aggregateId: purchase.productId,
+        eventType: PRODUCT_UPDATED_EVENT,
+        payload: { productId: purchase.productId },
+        correlationId,
+      });
+      return created;
     });
 
     this.logger.log({

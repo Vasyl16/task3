@@ -6,6 +6,9 @@ import {
 } from '@nestjs/common';
 import { SellerOrderStatus, UserRole, type Review } from '@prisma/client';
 import type { AuthenticatedUser } from '../../core/auth/authenticated-user.interface';
+import { CorrelationIdService } from '../../core/correlation-id/correlation-id.service';
+import { OutboxService } from '../../infrastructure/outbox/outbox.service';
+import { PrismaService } from '../../infrastructure/prisma/prisma.service';
 import {
   PurchaseContext,
   ReviewsRepository,
@@ -38,6 +41,12 @@ function buildPurchase(overrides: Partial<PurchaseContext> = {}) {
 describe('ReviewsService', () => {
   let reviewsService: ReviewsService;
   let reviewsRepository: jest.Mocked<ReviewsRepository>;
+  let outboxService: jest.Mocked<Pick<OutboxService, 'record'>>;
+  let correlationIdService: jest.Mocked<Pick<CorrelationIdService, 'getId'>>;
+  // Same stand-in as ProductsService's tests: a fake tx handle, asserted
+  // against below to confirm the review write and the outbox event went
+  // through the SAME transaction, not two independent calls.
+  const fakeTx = { marker: 'tx' };
 
   beforeEach(async () => {
     reviewsRepository = {
@@ -49,11 +58,21 @@ describe('ReviewsService', () => {
       findReviewablePurchases: jest.fn().mockResolvedValue([]),
       summarizeForProducts: jest.fn().mockResolvedValue([]),
     };
+    outboxService = { record: jest.fn() };
+    correlationIdService = { getId: jest.fn().mockReturnValue('corr-1') };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
         ReviewsService,
         { provide: ReviewsRepository, useValue: reviewsRepository },
+        { provide: OutboxService, useValue: outboxService },
+        { provide: CorrelationIdService, useValue: correlationIdService },
+        {
+          provide: PrismaService,
+          useValue: {
+            $transaction: jest.fn((cb: (tx: unknown) => unknown) => cb(fakeTx)),
+          },
+        },
       ],
     }).compile();
 
@@ -65,6 +84,7 @@ describe('ReviewsService', () => {
       await reviewsService.create(BUYER, { orderItemId: 'item-1', rating: 5 });
 
       expect(reviewsRepository.create).toHaveBeenCalledWith(
+        fakeTx,
         expect.objectContaining({
           orderItemId: 'item-1',
           // Taken from the purchase, never from the request: the client
@@ -73,6 +93,27 @@ describe('ReviewsService', () => {
           sellerId: 'seller-1',
           authorId: BUYER.id,
           rating: 5,
+        }),
+      );
+    });
+
+    // The reference case for reusing the outbox pattern here: a review
+    // is a rating change, and the product's Meilisearch document (used
+    // by search results/sort-by-rating) needs to hear about it — see
+    // SearchSyncConsumer, which already re-reads the review aggregate on
+    // every ProductUpdated it handles. Catalogue/product-detail pages
+    // don't need this event at all; they read ReviewsService live.
+    it('records a ProductUpdated outbox event in the same transaction as the review write', async () => {
+      await reviewsService.create(BUYER, { orderItemId: 'item-1', rating: 5 });
+
+      expect(outboxService.record).toHaveBeenCalledWith(
+        fakeTx,
+        expect.objectContaining({
+          eventType: 'ProductUpdated',
+          aggregateType: 'Product',
+          aggregateId: 'product-1',
+          payload: { productId: 'product-1' },
+          correlationId: 'corr-1',
         }),
       );
     });

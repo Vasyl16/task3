@@ -200,11 +200,31 @@ export async function apiRequest<T>(
   // unhelpful "Something went wrong" for what is really just "no data."
   // Reading the body as text first and checking for emptiness handles
   // both cases the same way, regardless of which status code carried it.
-  const text = await response.text();
+  //
+  // Everything from here down is wrapped: send()'s try/catch only
+  // guards the fetch() call itself, not reading the body afterwards — a
+  // connection that drops mid-stream (proxy hiccup, server restart
+  // between headers and body) throws its own raw TypeError here, and an
+  // unwrapped one would silently break this module's one promise:
+  // every call site only ever has to handle ApiError.
+  let text: string;
+  try {
+    text = await response.text();
+  } catch (error) {
+    throw ApiError.network(
+      error instanceof Error
+        ? error.message
+        : 'The connection was interrupted while reading the response',
+    );
+  }
   if (text.length === 0) {
     return undefined as T;
   }
-  return JSON.parse(text) as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw ApiError.network('The server sent a response that could not be read');
+  }
 }
 
 export const api = {

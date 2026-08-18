@@ -257,6 +257,48 @@ describe('apiRequest', () => {
     await expect(api.get('/sellers/me/profile')).resolves.toBeUndefined();
   });
 
+  // send()'s try/catch only guards the fetch() call itself. A connection
+  // that drops mid-stream — after headers arrive, before the body
+  // finishes — throws its own raw error from response.text(), a step
+  // that used to be unguarded and would leak straight past this module's
+  // one promise: every call site only ever has to handle ApiError.
+  it('turns a body-read failure into a network ApiError instead of leaking a raw exception', async () => {
+    currentToken = VALID_TOKEN;
+    const droppedMidBody = {
+      ok: true,
+      status: 200,
+      text: () => Promise.reject(new TypeError('network error')),
+    } as unknown as Response;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(droppedMidBody)),
+    );
+
+    const error = await api.get('/sellers/me/profile').catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).isNetworkError).toBe(true);
+  });
+
+  it('turns malformed JSON on an otherwise-successful response into an ApiError, not a raw SyntaxError', async () => {
+    currentToken = VALID_TOKEN;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response('not actually json', {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        ),
+      ),
+    );
+
+    const error = await api.get('/products').catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+  });
+
   it('turns a network failure into a network ApiError', async () => {
     currentToken = VALID_TOKEN;
     vi.stubGlobal(

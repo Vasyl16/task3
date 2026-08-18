@@ -1,4 +1,4 @@
-import type { Review, SellerOrderStatus } from '@prisma/client';
+import type { Prisma, Review, SellerOrderStatus } from '@prisma/client';
 
 // Everything needed to decide whether a review is allowed, read in one
 // go. Assembled from OrderItem -> SellerOrder -> Order, which is the
@@ -41,14 +41,19 @@ export abstract class ReviewsRepository {
 
   abstract findByOrderItemId(orderItemId: string): Promise<Review | null>;
 
-  abstract create(data: {
-    orderItemId: string;
-    productId: string;
-    sellerId: string;
-    authorId: string;
-    rating: number;
-    comment?: string;
-  }): Promise<Review>;
+  // tx: the review write and the search-resync outbox event it triggers
+  // must land atomically — see ReviewsService.create.
+  abstract create(
+    tx: Prisma.TransactionClient,
+    data: {
+      orderItemId: string;
+      productId: string;
+      sellerId: string;
+      authorId: string;
+      rating: number;
+      comment?: string;
+    },
+  ): Promise<Review>;
 
   abstract findManyForProduct(productId: string): Promise<Review[]>;
 

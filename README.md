@@ -556,7 +556,14 @@ and client-retried commands (`IdempotencyKeyService` / `IdempotencyKey`
 via an `Idempotency-Key` header — wired on checkout and bid placement).
 Meilisearch product search is implemented end-to-end on top of this:
 `Product` create/update/archive → outbox → BullMQ → `SearchSyncConsumer`
-→ Meilisearch, fully decoupled and eventually consistent. Four consumers
+→ Meilisearch, fully decoupled and eventually consistent. The same
+`ProductUpdated` event is reused, unchanged, whenever something *other*
+than the `Product` row itself changes a field the search document
+denormalizes — `BiddingService` records it on auction create/end
+(`hasActiveAuction`) and `ReviewsService` records it on review creation
+(`productRating`) — rather than each caller inventing its own event
+type for what `SearchSyncConsumer` already knows how to re-derive from
+Postgres. Four consumers
 are wired: search sync, order processing (auto-advances a new
 `SellerOrder` to `PROCESSING`), notifications (tells the seller about a
 new order), and auction deadlines (ends auctions / expires unclaimed
@@ -588,6 +595,33 @@ under genuine concurrent requests, not just mocked ones, by
 `test/bidding-concurrency.e2e-spec.ts` — and a full deadline lifecycle
 (`SCHEDULED → ACTIVE → ENDED/EXPIRED`, winner checkout window,
 auto-expiry).
+
+**Verified-purchase reviews and ratings are implemented**
+(`backend/src/modules/reviews/`). A review is created against an
+`orderItemId`, not a `productId` — that's what proves the purchase — and
+`ReviewsService.create` only accepts it when the caller is the buyer on
+that line item's order (404, not 403, if not — the same ownership/IDOR
+posture as everywhere else, see `backend-architecture`'s "Authentication
+& authorization" section) and that order's `SellerOrder` has reached
+`COMPLETED`; a second review of the same line item is rejected by both
+an app-level check and a DB unique constraint (`Review.orderItemId`) as
+the concurrency backstop. A product's rating is never a stored column —
+it's aggregated live from `Review` rows on every read, which is what
+`GET /products/:id/rating` and `GET /products/:id/reviews` return, and
+what `ProductsService` uses to enrich every catalog listing and product
+detail response (and to serve `sort=rating`). `GET /reviews/pending`
+answers "what can I still review" (completed line items with no review
+yet) and `GET /reviews/mine` lists a buyer's own reviews. Creating a
+review also records a `ProductUpdated` outbox event in the same
+transaction as the review write, reusing the exact mechanism
+`BiddingService` already uses to keep `hasActiveAuction` current in
+Meilisearch (see below) — so `SearchSyncConsumer` re-syncs the
+product's search document and its rating stops lagging on search
+results/sort-by-rating specifically; the catalog and product-detail
+reads above never needed this, since they already read `ReviewsService`
+live on every request. Frontend: `entities/review`, `widgets/
+product-reviews`, and `features/leave-review` wire the rating display
+and review form into the product detail page.
 
 **The real-time layer is implemented** (`backend/src/infrastructure/
 realtime/`): a NestJS WebSocket gateway on Socket.IO at the `/realtime`

@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { OutboxModule } from '../../infrastructure/outbox/outbox.module';
 import { ReviewsController } from './reviews.controller';
 import { ReviewsService } from './reviews.service';
 import { ReviewsRepository } from './domain/reviews.repository';
@@ -16,6 +17,7 @@ import { PrismaReviewsRepository } from './infrastructure/prisma-reviews.reposit
 // single equality on a value read in the same query, so the duplication
 // is nominal.
 @Module({
+  imports: [OutboxModule],
   controllers: [ReviewsController],
   providers: [
     ReviewsService,

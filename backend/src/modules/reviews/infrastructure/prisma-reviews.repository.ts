@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { SellerOrderStatus, type Review } from '@prisma/client';
+import { SellerOrderStatus, type Prisma, type Review } from '@prisma/client';
 import { PrismaService } from '../../../infrastructure/prisma/prisma.service';
 import {
   ProductRatingSummary,
@@ -46,15 +46,18 @@ export class PrismaReviewsRepository extends ReviewsRepository {
     return this.prisma.review.findUnique({ where: { orderItemId } });
   }
 
-  create(data: {
-    orderItemId: string;
-    productId: string;
-    sellerId: string;
-    authorId: string;
-    rating: number;
-    comment?: string;
-  }): Promise<Review> {
-    return this.prisma.review.create({ data });
+  create(
+    tx: Prisma.TransactionClient,
+    data: {
+      orderItemId: string;
+      productId: string;
+      sellerId: string;
+      authorId: string;
+      rating: number;
+      comment?: string;
+    },
+  ): Promise<Review> {
+    return tx.review.create({ data });
   }
 
   findManyForProduct(productId: string): Promise<Review[]> {
